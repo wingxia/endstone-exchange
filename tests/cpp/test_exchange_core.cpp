@@ -7,6 +7,7 @@
 #include "endstone_exchange/core/ExchangeService.hpp"
 #include "endstone_exchange/core/ItemIdentity.hpp"
 #include "endstone_exchange/core/Repository.hpp"
+#include "endstone_exchange/catalog/GeneratedCatalog.hpp"
 #include "endstone_exchange/ui/ExchangeUiModel.hpp"
 
 using namespace exchange;
@@ -130,12 +131,73 @@ void test_admin_system_stock() {
     assert(economy.balance("ExchangeSystem") == 0);
 }
 
+void test_generated_catalog_is_searchable() {
+    assert(exchange::catalog::products().size() > 700);
+    InMemoryRepository repo;
+    FakeEconomy economy;
+    ExchangeService service(repo, economy);
+    for (const auto& product : exchange::catalog::products()) {
+        repo.upsertProduct(product);
+    }
+
+    const auto diamond = service.searchCatalog("diamond");
+    assert(!diamond.empty());
+    assert(std::any_of(diamond.begin(), diamond.end(), [](const Product& product) {
+        return product.item_id == "minecraft:diamond";
+    }));
+
+    const auto oak = service.searchCatalog("oak_log");
+    assert(!oak.empty());
+    assert(std::any_of(oak.begin(), oak.end(), [](const Product& product) {
+        return product.item_id == "minecraft:oak_log";
+    }));
+}
+
+void test_mailbox_claim_marks_item() {
+    InMemoryRepository repo;
+    FakeEconomy economy;
+    ExchangeService service(repo, economy);
+    const PlayerRef buyer{"buyer-uuid", "Buyer"};
+
+    repo.addMailboxItem(MailboxItem{0, buyer.uuid, buyer.name, productKey("minecraft:diamond", {}), 3, {}, "diamond", false});
+    auto mailbox = service.listMailbox(buyer);
+    assert(mailbox.size() == 1);
+
+    const auto claimed = service.markMailboxClaimed(buyer, mailbox.front().id);
+    assert(claimed.claimed);
+    assert(service.listMailbox(buyer).empty());
+
+    bool failed = false;
+    try {
+        service.markMailboxClaimed(buyer, mailbox.front().id);
+    } catch (const InvalidOrder&) {
+        failed = true;
+    }
+    assert(failed);
+}
+
 void test_ui_model_contains_expected_actions() {
     ui::ExchangeUiModel model(8);
     const auto form = model.home({{"building", "基建", "textures/blocks/stone"}}, true);
     assert(form.buttons.size() >= 6);
-    assert(form.buttons[0].action == ui::ActionKind::OpenInventorySell);
-    assert(form.buttons[1].action == ui::ActionKind::SellAll);
+    assert(form.buttons[0].action == ui::ActionKind::OpenSearch);
+    assert(form.buttons[1].action == ui::ActionKind::OpenAllProducts);
+}
+
+void test_ui_model_search_results_page_targets() {
+    ui::ExchangeUiModel model(6);
+    const auto diamond = productFor("minecraft:diamond");
+    const auto stone = productFor("minecraft:stone");
+    const auto bread = productFor("minecraft:bread");
+    const auto apple = productFor("minecraft:apple");
+    const auto coal = productFor("minecraft:coal");
+    const auto emerald = productFor("minecraft:emerald");
+    const auto iron = productFor("minecraft:iron_ingot");
+    const auto form = model.searchResults("stone", {diamond, stone, bread, apple, coal, emerald, iron}, 0);
+    assert(form.buttons.size() == 8);
+    assert(form.buttons[0].action == ui::ActionKind::OpenProduct);
+    assert(form.buttons[6].action == ui::ActionKind::NextPage);
+    assert(form.buttons[6].target == "search|1");
 }
 
 }  // namespace
@@ -147,7 +209,10 @@ int main() {
     test_market_sell_only_sells_to_existing_bids();
     test_cancel_refunds_buy_order();
     test_admin_system_stock();
+    test_generated_catalog_is_searchable();
+    test_mailbox_claim_marks_item();
     test_ui_model_contains_expected_actions();
+    test_ui_model_search_results_page_targets();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }

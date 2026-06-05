@@ -192,6 +192,21 @@ void InMemoryRepository::addMailboxItem(MailboxItem item) {
     mailbox_.push_back(std::move(item));
 }
 
+std::optional<MailboxItem> InMemoryRepository::getMailboxItem(std::int64_t id) const {
+    auto it = std::find_if(mailbox_.begin(), mailbox_.end(), [&](const MailboxItem& item) { return item.id == id; });
+    if (it == mailbox_.end()) {
+        return std::nullopt;
+    }
+    return *it;
+}
+
+void InMemoryRepository::updateMailboxItem(const MailboxItem& item) {
+    auto it = std::find_if(mailbox_.begin(), mailbox_.end(), [&](const MailboxItem& current) { return current.id == item.id; });
+    if (it != mailbox_.end()) {
+        *it = item;
+    }
+}
+
 std::vector<MailboxItem> InMemoryRepository::mailboxForPlayer(const std::string& player_uuid) const {
     std::vector<MailboxItem> out;
     for (const auto& item : mailbox_) {
@@ -230,4 +245,3 @@ std::vector<SettlementJob> InMemoryRepository::pendingSettlementJobs(std::size_t
 }
 
 }  // namespace exchange
-

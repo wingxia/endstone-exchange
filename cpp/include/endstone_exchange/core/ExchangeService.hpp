@@ -15,6 +15,7 @@ public:
     ExchangeService(Repository& repository, Economy& economy);
 
     std::vector<Product> getCatalog(const std::optional<std::string>& category = std::nullopt) const;
+    std::vector<Product> searchCatalog(const std::string& query, const std::optional<std::string>& category = std::nullopt, std::size_t limit = 0) const;
     Quote getQuote(const std::string& product_key) const;
     OrderBook listOrderBook(const std::string& product_key, std::size_t depth) const;
     std::vector<Order> listPlayerOrders(const PlayerRef& player, bool include_closed) const;
@@ -28,6 +29,8 @@ public:
     Order adminCreateSystemSellOrder(const PlayerRef& admin, const std::string& product_key, std::int32_t quantity, std::int64_t unit_price, std::vector<std::uint8_t> nbt_template = {});
     Order adminCancelSystemOrder(const PlayerRef& admin, std::int64_t order_id);
 
+    std::vector<MailboxItem> listMailbox(const PlayerRef& player) const;
+    MailboxItem markMailboxClaimed(const PlayerRef& player, std::int64_t mailbox_id);
     void processSettlements(std::size_t limit = 50);
 
 private:
@@ -53,4 +56,3 @@ private:
 };
 
 }  // namespace exchange
-

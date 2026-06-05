@@ -1,6 +1,7 @@
 #include "endstone_exchange/core/ExchangeService.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 namespace exchange {
@@ -13,12 +14,48 @@ std::string keyFor(const std::string& prefix, std::int64_t id) {
     return prefix + ":" + std::to_string(id);
 }
 
+std::string lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+bool containsTerm(const Product& product, const std::string& needle) {
+    if (needle.empty()) {
+        return true;
+    }
+    if (lowercase(product.item_id).find(needle) != std::string::npos ||
+        lowercase(product.display_name).find(needle) != std::string::npos ||
+        lowercase(product.category).find(needle) != std::string::npos) {
+        return true;
+    }
+    return std::any_of(product.search_terms.begin(), product.search_terms.end(), [&](const std::string& term) {
+        return lowercase(term).find(needle) != std::string::npos;
+    });
+}
+
 }  // namespace
 
 ExchangeService::ExchangeService(Repository& repository, Economy& economy) : repository_(repository), economy_(economy) {}
 
 std::vector<Product> ExchangeService::getCatalog(const std::optional<std::string>& category) const {
     return repository_.listProducts(category);
+}
+
+std::vector<Product> ExchangeService::searchCatalog(const std::string& query, const std::optional<std::string>& category, std::size_t limit) const {
+    const auto needle = lowercase(query);
+    std::vector<Product> matches;
+    for (const auto& product : repository_.listProducts(category)) {
+        if (!containsTerm(product, needle)) {
+            continue;
+        }
+        matches.push_back(product);
+        if (limit > 0 && matches.size() >= limit) {
+            break;
+        }
+    }
+    return matches;
 }
 
 Quote ExchangeService::getQuote(const std::string& product_key) const {
@@ -195,6 +232,26 @@ Order ExchangeService::adminCreateSystemSellOrder(const PlayerRef&, const std::s
 
 Order ExchangeService::adminCancelSystemOrder(const PlayerRef& admin, std::int64_t order_id) {
     return cancelOrder(admin, order_id, true);
+}
+
+std::vector<MailboxItem> ExchangeService::listMailbox(const PlayerRef& player) const {
+    return repository_.mailboxForPlayer(player.uuid);
+}
+
+MailboxItem ExchangeService::markMailboxClaimed(const PlayerRef& player, std::int64_t mailbox_id) {
+    auto item = repository_.getMailboxItem(mailbox_id);
+    if (!item) {
+        throw InvalidOrder("mailbox item not found");
+    }
+    if (item->player_uuid != player.uuid) {
+        throw InvalidOrder("cannot claim another player's mailbox item");
+    }
+    if (item->claimed) {
+        throw InvalidOrder("mailbox item is already claimed");
+    }
+    item->claimed = true;
+    repository_.updateMailboxItem(*item);
+    return *item;
 }
 
 void ExchangeService::processSettlements(std::size_t limit) {

@@ -16,12 +16,18 @@ enum class ActionKind {
     MarketSell,
     LimitSell,
     OpenOrderBook,
+    OpenSearch,
+    OpenAllProducts,
     OpenInventorySell,
     SellAll,
     OpenMyOrders,
     OpenMailbox,
     OpenAdmin,
     AdminRestock,
+    ConfirmTrade,
+    CancelOrder,
+    ClaimMailboxItem,
+    ClaimAllMailbox,
     Back,
     NextPage,
     PrevPage
@@ -55,15 +61,18 @@ class ExchangeUiModel {
 public:
     explicit ExchangeUiModel(std::size_t page_size = 18);
 
-    FormSpec home(const std::vector<CategorySpec>& categories, bool admin) const;
+    FormSpec home(const std::vector<CategorySpec>& categories, bool admin, std::optional<std::int64_t> balance = std::nullopt) const;
     FormSpec categoryPage(const CategorySpec& category, const std::vector<Product>& products, std::size_t page) const;
+    FormSpec searchResults(const std::string& query, const std::vector<Product>& products, std::size_t page) const;
     FormSpec productPage(const ProductView& view) const;
     FormSpec orderBookPage(const Product& product, const OrderBook& book) const;
+    FormSpec myOrdersPage(const std::vector<Order>& orders) const;
+    FormSpec mailboxPage(const std::vector<MailboxItem>& items) const;
     FormSpec adminHome(const std::vector<Product>& stock_templates) const;
 
 private:
+    FormSpec productListPage(std::string title, std::string body, std::string page_target, const std::vector<Product>& products, std::size_t page, ActionKind page_action) const;
     std::size_t page_size_;
 };
 
 }  // namespace exchange::ui
-

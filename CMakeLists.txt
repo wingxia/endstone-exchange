@@ -10,6 +10,7 @@ option(EXCHANGE_BUILD_TESTS "Build core tests" ON)
 option(EXCHANGE_BUILD_ENDSTONE_PLUGIN "Build Endstone plugin target" OFF)
 
 add_library(exchange_core
+    cpp/src/catalog/GeneratedCatalog.cpp
     cpp/src/core/ExchangeService.cpp
     cpp/src/core/HttpBridgeEconomy.cpp
     cpp/src/core/InMemoryRepository.cpp

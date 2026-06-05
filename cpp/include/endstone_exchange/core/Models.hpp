@@ -26,6 +26,7 @@ struct Product {
     std::string category;
     std::string icon;
     bool tradable{true};
+    std::vector<std::string> search_terms;
 };
 
 struct ItemSnapshot {
@@ -132,4 +133,3 @@ struct PlayerRef {
 };
 
 }  // namespace exchange
-

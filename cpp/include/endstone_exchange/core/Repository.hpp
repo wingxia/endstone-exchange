@@ -37,6 +37,8 @@ public:
     virtual void addTradeItem(std::int64_t trade_id, std::int64_t lot_id, std::int32_t quantity, std::vector<std::uint8_t> nbt_blob, std::string nbt_summary) = 0;
 
     virtual void addMailboxItem(MailboxItem item) = 0;
+    virtual std::optional<MailboxItem> getMailboxItem(std::int64_t id) const = 0;
+    virtual void updateMailboxItem(const MailboxItem& item) = 0;
     virtual std::vector<MailboxItem> mailboxForPlayer(const std::string& player_uuid) const = 0;
 
     virtual SettlementJob createSettlementJob(SettlementJob job) = 0;
@@ -70,6 +72,8 @@ public:
     void addTradeItem(std::int64_t trade_id, std::int64_t lot_id, std::int32_t quantity, std::vector<std::uint8_t> nbt_blob, std::string nbt_summary) override;
 
     void addMailboxItem(MailboxItem item) override;
+    std::optional<MailboxItem> getMailboxItem(std::int64_t id) const override;
+    void updateMailboxItem(const MailboxItem& item) override;
     std::vector<MailboxItem> mailboxForPlayer(const std::string& player_uuid) const override;
 
     SettlementJob createSettlementJob(SettlementJob job) override;
@@ -96,4 +100,3 @@ private:
 bool isOpen(OrderStatus status);
 
 }  // namespace exchange
-

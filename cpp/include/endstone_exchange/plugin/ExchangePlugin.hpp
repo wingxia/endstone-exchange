@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <endstone/endstone.hpp>
@@ -24,19 +25,33 @@ private:
     void seedCatalog();
     void openHome(endstone::Player& player);
     void openCategory(endstone::Player& player, const std::string& category_id, std::size_t page = 0);
+    void openAllProducts(endstone::Player& player, std::size_t page = 0);
+    void openSearch(endstone::Player& player);
+    void openSearchResults(endstone::Player& player, std::size_t page = 0);
     void openProduct(endstone::Player& player, const std::string& product_key);
     void openOrderBook(endstone::Player& player, const std::string& product_key);
+    void openMyOrders(endstone::Player& player);
+    void openMailbox(endstone::Player& player);
     void openAdmin(endstone::Player& player);
+    void openTradeForm(endstone::Player& player, ui::ActionKind action, const std::string& product_key);
+    void openTradeConfirm(endstone::Player& player, ui::ActionKind action, const std::string& product_key, std::int32_t quantity, std::int64_t unit_price);
     void sendForm(endstone::Player& player, const ui::FormSpec& spec);
     void handleAction(endstone::Player& player, const ui::ButtonSpec& button);
+    void executeConfirmedTrade(endstone::Player& player, const std::string& payload);
+    void claimMailboxItem(endstone::Player& player, std::int64_t mailbox_id);
+    void claimAllMailbox(endstone::Player& player);
     void sendNotice(endstone::Player& player, const std::string& message);
     std::vector<ui::CategorySpec> categories() const;
     PlayerRef playerRef(endstone::Player& player) const;
+    ItemSnapshot snapshotFor(const Product& product, std::int32_t quantity) const;
+    bool removeInventoryItems(endstone::Player& player, const Product& product, std::int32_t quantity);
+    bool giveMailboxItem(endstone::Player& player, const MailboxItem& item);
 
     std::unique_ptr<InMemoryRepository> repository_;
     std::unique_ptr<Economy> economy_;
     std::unique_ptr<ExchangeService> service_;
     ui::ExchangeUiModel ui_{18};
+    std::unordered_map<std::string, std::string> search_queries_;
 };
 
 }  // namespace exchange::plugin
