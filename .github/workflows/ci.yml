@@ -41,6 +41,8 @@ jobs:
       CXX: clang++
     steps:
       - uses: actions/checkout@v4
+      - name: Install Endstone Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libc++-dev libc++abi-dev ninja-build
       - name: Configure Endstone plugin
         run: cmake -G Ninja -S . -B build-plugin -DEXCHANGE_BUILD_TESTS=OFF -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=ON
       - name: Build Linux plugin
