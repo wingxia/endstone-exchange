@@ -18,10 +18,12 @@ class FakeUMoney:
         self.money = {"Steve": 100}
 
     def api_get_player_money(self, player):
-        return self.money.get(player, 0)
+        return self.money.get(player)
 
     def api_change_player_money(self, player, change):
-        self.money[player] = self.money.get(player, 0) + change
+        if player not in self.money:
+            return
+        self.money[player] += change
 
 
 class BridgeTest(unittest.TestCase):
@@ -67,7 +69,13 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("insufficient", payload["error"])
 
+    def test_rejects_missing_player_money_changes(self):
+        self.assertEqual(self.request("GET", "/balance?player=Alex")[1]["balance"], 0)
+        status, payload = self.request("POST", "/credit", {"player": "Alex", "amount": 10, "idempotency_key": "k3"})
+        self.assertEqual(status, 400)
+        self.assertIn("player data not found", payload["error"])
+        self.assertNotIn("Alex", self.umoney.money)
+
 
 if __name__ == "__main__":
     unittest.main()
-

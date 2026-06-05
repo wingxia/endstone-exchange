@@ -15,21 +15,29 @@ class BridgeState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     idempotency: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def balance(self, player: str) -> int:
+    def raw_balance(self, player: str) -> int | None:
         value = self.umoney.api_get_player_money(player)
         if value is None:
-            return 0
+            return None
         return int(value)
+
+    def balance(self, player: str) -> int:
+        value = self.raw_balance(player)
+        if value is None:
+            return 0
+        return value
 
     def debit(self, player: str, amount: int, key: str) -> dict[str, Any]:
         with self.lock:
             if key in self.idempotency:
                 return self.idempotency[key]
-            current = self.balance(player)
+            current = self.raw_balance(player)
+            if current is None:
+                raise ValueError("player data not found")
             if current < amount:
                 raise ValueError("insufficient funds")
             self.umoney.api_change_player_money(player, -amount)
-            response = {"ok": True, "balance": current - amount}
+            response = {"ok": True, "balance": self.balance(player)}
             self.idempotency[key] = response
             return response
 
@@ -37,9 +45,10 @@ class BridgeState:
         with self.lock:
             if key in self.idempotency:
                 return self.idempotency[key]
-            current = self.balance(player)
+            if self.raw_balance(player) is None:
+                raise ValueError("player data not found")
             self.umoney.api_change_player_money(player, amount)
-            response = {"ok": True, "balance": current + amount}
+            response = {"ok": True, "balance": self.balance(player)}
             self.idempotency[key] = response
             return response
 
@@ -100,4 +109,3 @@ def make_handler(state: BridgeState):
             self.wfile.write(body)
 
     return Handler
-
