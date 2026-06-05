@@ -92,7 +92,7 @@ bool ExchangePlugin::onCommand(endstone::CommandSender& sender, const endstone::
         sender.sendMessage("Exchange catalog reloaded.");
         return true;
     }
-    auto* player = dynamic_cast<endstone::Player*>(&sender);
+    auto* player = sender.asPlayer();
     if (player == nullptr) {
         sender.sendErrorMessage("Exchange UI can only be opened by players.");
         return true;
