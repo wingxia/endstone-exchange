@@ -23,12 +23,18 @@ public:
 private:
     void seedCatalog();
     void openHome(endstone::Player& player);
+    void openCategory(endstone::Player& player, const std::string& category_id, std::size_t page = 0);
+    void openProduct(endstone::Player& player, const std::string& product_key);
+    void openOrderBook(endstone::Player& player, const std::string& product_key);
     void openAdmin(endstone::Player& player);
     void sendForm(endstone::Player& player, const ui::FormSpec& spec);
+    void handleAction(endstone::Player& player, const ui::ButtonSpec& button);
+    void sendNotice(endstone::Player& player, const std::string& message);
+    std::vector<ui::CategorySpec> categories() const;
     PlayerRef playerRef(endstone::Player& player) const;
 
     std::unique_ptr<InMemoryRepository> repository_;
-    std::unique_ptr<FakeEconomy> economy_;
+    std::unique_ptr<Economy> economy_;
     std::unique_ptr<ExchangeService> service_;
     ui::ExchangeUiModel ui_{18};
 };
