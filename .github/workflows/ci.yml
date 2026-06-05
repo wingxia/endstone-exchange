@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure Endstone plugin
-        run: cmake -S . -B build-plugin -DEXCHANGE_BUILD_TESTS=OFF -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=ON
+        run: cmake -G Ninja -S . -B build-plugin -DEXCHANGE_BUILD_TESTS=OFF -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=ON
       - name: Build Linux plugin
         run: cmake --build build-plugin --parallel 2
       - name: Upload plugin artifact
