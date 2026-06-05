@@ -35,7 +35,9 @@ jobs:
           path: python/umoney_bridge/dist/*.whl
 
   plugin-linux:
-    runs-on: ubuntu-latest
+    # Keep the deployable Linux plugin compatible with the NAS runtime. Newer
+    # ubuntu-latest images can emit GLIBC_2.38+ references that the NAS cannot load.
+    runs-on: ubuntu-22.04
     env:
       CC: clang
       CXX: clang++
@@ -47,6 +49,12 @@ jobs:
         run: cmake -G Ninja -S . -B build-plugin -DEXCHANGE_BUILD_TESTS=OFF -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=ON
       - name: Build Linux plugin
         run: cmake --build build-plugin --parallel 2
+      - name: Verify NAS glibc compatibility
+        run: |
+          if readelf --version-info build-plugin/endstone_endstone_exchange.so | grep -E 'GLIBC_2\.(3[8-9]|[4-9][0-9])'; then
+            echo "Linux plugin depends on glibc newer than the NAS-compatible baseline."
+            exit 1
+          fi
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
