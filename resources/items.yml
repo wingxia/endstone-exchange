@@ -1,0 +1,94 @@
+categories:
+  common:
+    name: 常用
+    icon: textures/items/emerald
+    items:
+      minecraft:diamond:
+        name: 钻石
+        icon: textures/items/diamond
+      minecraft:iron_ingot:
+        name: 铁锭
+        icon: textures/items/iron_ingot
+  building:
+    name: 基建
+    icon: textures/blocks/stone
+    items:
+      minecraft:stone:
+        name: 石头
+        icon: textures/blocks/stone
+      minecraft:cobblestone:
+        name: 圆石
+        icon: textures/blocks/cobblestone
+      minecraft:dirt:
+        name: 泥土
+        icon: textures/blocks/dirt
+      minecraft:oak_log:
+        name: 橡木原木
+        icon: textures/blocks/log_oak
+      minecraft:oak_planks:
+        name: 橡木木板
+        icon: textures/blocks/planks_oak
+  ores:
+    name: 矿物
+    icon: textures/items/diamond
+    items:
+      minecraft:coal:
+        name: 煤炭
+        icon: textures/items/coal
+      minecraft:gold_ingot:
+        name: 金锭
+        icon: textures/items/gold_ingot
+      minecraft:emerald:
+        name: 绿宝石
+        icon: textures/items/emerald
+  redstone:
+    name: 红石
+    icon: textures/items/redstone_dust
+    items:
+      minecraft:redstone:
+        name: 红石粉
+        icon: textures/items/redstone_dust
+      minecraft:piston:
+        name: 活塞
+        icon: textures/blocks/piston_top
+  food:
+    name: 食物
+    icon: textures/items/bread
+    items:
+      minecraft:bread:
+        name: 面包
+        icon: textures/items/bread
+      minecraft:apple:
+        name: 苹果
+        icon: textures/items/apple
+      minecraft:cooked_beef:
+        name: 熟牛肉
+        icon: textures/items/beef_cooked
+  tools:
+    name: 工具武器
+    icon: textures/items/diamond_pickaxe
+    items:
+      minecraft:diamond_sword:
+        name: 钻石剑
+        icon: textures/items/diamond_sword
+      minecraft:diamond_pickaxe:
+        name: 钻石镐
+        icon: textures/items/diamond_pickaxe
+      minecraft:bow:
+        name: 弓
+        icon: textures/items/bow_standby
+  armor:
+    name: 防具
+    icon: textures/items/diamond_chestplate
+    items:
+      minecraft:diamond_helmet:
+        name: 钻石头盔
+        icon: textures/items/diamond_helmet
+      minecraft:diamond_chestplate:
+        name: 钻石胸甲
+        icon: textures/items/diamond_chestplate
+  other:
+    name: 其他
+    icon: textures/items/barrier
+    items: {}
+

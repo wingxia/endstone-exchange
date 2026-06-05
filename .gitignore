@@ -1,0 +1,14 @@
+build/
+build-*/
+cmake-build-*/
+*.so
+*.dylib
+*.dll
+*.o
+*.pyc
+__pycache__/
+.pytest_cache/
+dist/
+*.egg-info/
+.DS_Store
+

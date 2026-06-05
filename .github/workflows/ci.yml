@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DEXCHANGE_BUILD_TESTS=ON -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=OFF
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test C++ core
+        run: ctest --test-dir build --output-on-failure
+      - name: Test UMoney bridge
+        run: python3 -m unittest discover -s tests/python
+
+  package-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build bridge wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build python/umoney_bridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: umoney-bridge-wheel
+          path: python/umoney_bridge/dist/*.whl
+
+  plugin-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Endstone plugin
+        run: cmake -S . -B build-plugin -DEXCHANGE_BUILD_TESTS=OFF -DEXCHANGE_BUILD_ENDSTONE_PLUGIN=ON
+      - name: Build Linux plugin
+        run: cmake --build build-plugin --parallel 2
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: endstone-exchange-linux
+          path: |
+            build-plugin/*.so
+            build-plugin/**/*.so
