@@ -87,7 +87,7 @@ PlayerRef ExchangePlugin::playerRef(endstone::Player& player) const {
 
 }  // namespace exchange::plugin
 
-ENDSTONE_PLUGIN("endstone_exchange", "0.1.0", exchange::plugin::ExchangePlugin) {
+ENDSTONE_PLUGIN("exchange", "0.1.0", exchange::plugin::ExchangePlugin) {
     prefix = "Exchange";
     description = "C++ item exchange with MySQL order book and UMoney bridge";
     website = "https://github.com/wingxia/endstone-exchange";
