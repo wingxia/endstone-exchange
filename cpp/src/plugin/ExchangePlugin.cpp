@@ -21,6 +21,11 @@ bool ExchangePlugin::onCommand(endstone::CommandSender& sender, const endstone::
     if (name != "ex" && name != "exchange") {
         return false;
     }
+    if (!args.empty() && args.front() == "reload") {
+        seedCatalog();
+        sender.sendMessage("Exchange catalog reloaded.");
+        return true;
+    }
     auto* player = dynamic_cast<endstone::Player*>(&sender);
     if (player == nullptr) {
         sender.sendErrorMessage("Exchange UI can only be opened by players.");
@@ -28,11 +33,6 @@ bool ExchangePlugin::onCommand(endstone::CommandSender& sender, const endstone::
     }
     if (!args.empty() && args.front() == "admin") {
         openAdmin(*player);
-        return true;
-    }
-    if (!args.empty() && args.front() == "reload") {
-        seedCatalog();
-        sender.sendMessage("Exchange catalog reloaded.");
         return true;
     }
     openHome(*player);
