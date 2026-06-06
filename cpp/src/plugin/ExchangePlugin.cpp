@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cctype>
 #include <climits>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <unordered_map>
 
 #include <endstone/color_format.h>
+#include <endstone/form/action_form.h>
 #include <endstone/form/controls/text_input.h>
 #include <endstone/form/modal_form.h>
 #include <endstone/inventory/item_stack.h>
@@ -18,6 +20,8 @@
 #include "endstone_exchange/catalog/GeneratedCatalog.hpp"
 namespace exchange::plugin {
 namespace {
+
+constexpr std::size_t kDashboardPageSize = 12;
 
 struct BridgeConfig {
     std::string host{"127.0.0.1"};
@@ -201,6 +205,18 @@ std::pair<std::string, std::size_t> parsePageTarget(const std::string& target) {
     return {parts[0], page ? static_cast<std::size_t>(*page) : 0};
 }
 
+std::optional<std::size_t> parsePageIndex(const std::string& value) {
+    std::int64_t parsed = 0;
+    const auto trimmed = trim(value);
+    const auto* first = trimmed.data();
+    const auto* last = trimmed.data() + trimmed.size();
+    const auto result = std::from_chars(first, last, parsed);
+    if (result.ec != std::errc{} || result.ptr != last || parsed < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 }  // namespace
 
 void ExchangePlugin::onEnable() {
@@ -252,30 +268,186 @@ void ExchangePlugin::seedCatalog() {
 }
 
 void ExchangePlugin::openHome(endstone::Player& player) {
+    openDashboard(player);
+}
+
+void ExchangePlugin::openDashboard(endstone::Player& player) {
     std::optional<std::int64_t> balance;
     try {
         balance = economy_->balance(player.getName());
     } catch (...) {
         balance = std::nullopt;
     }
-    sendForm(player, ui_.home(categories(), player.hasPermission("exchange.admin"), balance));
+
+    auto all_categories = categories();
+    auto& state = dashboardState(player);
+    if (all_categories.empty()) {
+        sendForm(player, ui_.dashboard(ui::DashboardView{{}, "", "", {}, 0, 1, 0, std::nullopt, balance, player.hasPermission("exchange.admin"), state.search_query}));
+        return;
+    }
+
+    const auto category_exists = [&](const std::string& category_id) {
+        return std::any_of(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
+            return category.id == category_id;
+        });
+    };
+    if (state.search_query.empty() && (state.category_id.empty() || !category_exists(state.category_id))) {
+        state.category_id = all_categories.front().id;
+        state.page = 0;
+        state.product_key.clear();
+    }
+
+    std::vector<Product> products;
+    std::string active_category_name;
+    if (!state.search_query.empty()) {
+        products = service_->searchCatalog(state.search_query);
+        active_category_name = "搜索结果";
+    } else {
+        products = service_->getCatalog(state.category_id);
+        auto category_it = std::find_if(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
+            return category.id == state.category_id;
+        });
+        active_category_name = category_it == all_categories.end() ? state.category_id : category_it->name;
+    }
+
+    const auto total_pages = std::max<std::size_t>(1, (products.size() + kDashboardPageSize - 1) / kDashboardPageSize);
+    if (state.page >= total_pages) {
+        state.page = total_pages - 1;
+    }
+    const auto start = std::min(products.size(), state.page * kDashboardPageSize);
+    const auto end = std::min(products.size(), start + kDashboardPageSize);
+
+    const auto selected_on_page = std::any_of(products.begin() + static_cast<std::ptrdiff_t>(start), products.begin() + static_cast<std::ptrdiff_t>(end), [&](const Product& product) {
+        return product.product_key == state.product_key;
+    });
+    if (!selected_on_page) {
+        state.product_key = start < end ? products[start].product_key : "";
+    }
+
+    std::vector<ui::DashboardProductView> product_views;
+    product_views.reserve(end - start);
+    for (std::size_t i = start; i < end; ++i) {
+        product_views.push_back({products[i], service_->getQuote(products[i].product_key), products[i].product_key == state.product_key});
+    }
+
+    std::optional<ui::ProductView> selected;
+    if (!state.product_key.empty()) {
+        auto product = repository_->getProduct(state.product_key);
+        if (product) {
+            selected = ui::ProductView{*product, service_->getQuote(product->product_key)};
+        }
+    }
+
+    sendForm(player, ui_.dashboard(ui::DashboardView{
+                         all_categories,
+                         state.category_id,
+                         active_category_name,
+                         product_views,
+                         state.page,
+                         total_pages,
+                         products.size(),
+                         selected,
+                         balance,
+                         player.hasPermission("exchange.admin"),
+                         state.search_query}));
+}
+
+void ExchangePlugin::openDashboardCategory(endstone::Player& player, const std::string& category_id) {
+    auto all_categories = categories();
+    const auto exists = std::any_of(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
+        return category.id == category_id;
+    });
+    if (!exists) {
+        sendNotice(player, "分类不存在。");
+        openDashboard(player);
+        return;
+    }
+    auto& state = dashboardState(player);
+    state.category_id = category_id;
+    state.search_query.clear();
+    state.page = 0;
+    state.product_key.clear();
+    search_queries_.erase(player.getUniqueId().str());
+    openDashboard(player);
+}
+
+void ExchangePlugin::openDashboardProduct(endstone::Player& player, const std::string& product_key) {
+    auto product = repository_->getProduct(product_key);
+    if (!product) {
+        sendNotice(player, "商品不存在。");
+        openDashboard(player);
+        return;
+    }
+
+    auto& state = dashboardState(player);
+    std::vector<Product> products;
+    if (!state.search_query.empty()) {
+        products = service_->searchCatalog(state.search_query);
+    }
+    auto it = std::find_if(products.begin(), products.end(), [&](const Product& candidate) {
+        return candidate.product_key == product_key;
+    });
+    if (it == products.end()) {
+        state.search_query.clear();
+        search_queries_.erase(player.getUniqueId().str());
+        state.category_id = product->category;
+        products = service_->getCatalog(state.category_id);
+        it = std::find_if(products.begin(), products.end(), [&](const Product& candidate) {
+            return candidate.product_key == product_key;
+        });
+    }
+    state.product_key = product_key;
+    if (it != products.end()) {
+        const auto index = static_cast<std::size_t>(std::distance(products.begin(), it));
+        state.page = index / kDashboardPageSize;
+    }
+    openDashboard(player);
+}
+
+void ExchangePlugin::openDashboardPage(endstone::Player& player, std::size_t page) {
+    auto& state = dashboardState(player);
+    state.page = page;
+    state.product_key.clear();
+    openDashboard(player);
+}
+
+void ExchangePlugin::resetDashboard(endstone::Player& player) {
+    auto& state = dashboardState(player);
+    state.category_id.clear();
+    state.page = 0;
+    state.product_key.clear();
+    state.search_query.clear();
+    search_queries_.erase(player.getUniqueId().str());
+    openDashboard(player);
 }
 
 void ExchangePlugin::openCategory(endstone::Player& player, const std::string& category_id, std::size_t page) {
-    auto all_categories = categories();
-    auto it = std::find_if(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
+    const auto all_categories = categories();
+    const auto exists = std::any_of(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
         return category.id == category_id;
     });
-    if (it == all_categories.end()) {
+    if (!exists) {
         sendNotice(player, "分类不存在。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
-    sendForm(player, ui_.categoryPage(*it, service_->getCatalog(category_id), page));
+    auto& state = dashboardState(player);
+    state.category_id = category_id;
+    state.search_query.clear();
+    state.page = page;
+    state.product_key.clear();
+    search_queries_.erase(player.getUniqueId().str());
+    openDashboard(player);
 }
 
 void ExchangePlugin::openAllProducts(endstone::Player& player, std::size_t page) {
-    sendForm(player, ui_.searchResults("全部物品", service_->getCatalog(), page));
+    auto& state = dashboardState(player);
+    state.category_id.clear();
+    state.search_query.clear();
+    state.page = page;
+    state.product_key.clear();
+    search_queries_.erase(player.getUniqueId().str());
+    openDashboard(player);
 }
 
 void ExchangePlugin::openSearch(endstone::Player& player) {
@@ -292,11 +464,16 @@ void ExchangePlugin::openSearch(endstone::Player& player) {
         const auto values = parseModalValues(json);
         if (values.empty() || trim(values[0]).empty()) {
             sendNotice(*submitted, "请输入搜索关键词。");
-            openHome(*submitted);
+            openDashboard(*submitted);
             return;
         }
-        search_queries_[submitted->getUniqueId().str()] = trim(values[0]);
-        openSearchResults(*submitted);
+        auto& state = dashboardState(*submitted);
+        state.search_query = trim(values[0]);
+        state.category_id.clear();
+        state.page = 0;
+        state.product_key.clear();
+        search_queries_[submitted->getUniqueId().str()] = state.search_query;
+        openDashboard(*submitted);
     });
     player.sendForm(std::move(form));
 }
@@ -307,24 +484,23 @@ void ExchangePlugin::openSearchResults(endstone::Player& player, std::size_t pag
         openSearch(player);
         return;
     }
-    sendForm(player, ui_.searchResults(it->second, service_->searchCatalog(it->second), page));
+    auto& state = dashboardState(player);
+    state.search_query = it->second;
+    state.category_id.clear();
+    state.page = page;
+    state.product_key.clear();
+    openDashboard(player);
 }
 
 void ExchangePlugin::openProduct(endstone::Player& player, const std::string& product_key) {
-    auto product = repository_->getProduct(product_key);
-    if (!product) {
-        sendNotice(player, "商品不存在。");
-        openHome(player);
-        return;
-    }
-    sendForm(player, ui_.productPage(ui::ProductView{*product, service_->getQuote(product_key)}));
+    openDashboardProduct(player, product_key);
 }
 
 void ExchangePlugin::openOrderBook(endstone::Player& player, const std::string& product_key) {
     auto product = repository_->getProduct(product_key);
     if (!product) {
         sendNotice(player, "商品不存在。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
     sendForm(player, ui_.orderBookPage(*product, service_->listOrderBook(product_key, 12)));
@@ -346,7 +522,7 @@ void ExchangePlugin::openTradeForm(endstone::Player& player, ui::ActionKind acti
     auto product = repository_->getProduct(product_key);
     if (!product) {
         sendNotice(player, "商品不存在。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
 
@@ -390,26 +566,26 @@ void ExchangePlugin::openTradeForm(endstone::Player& player, ui::ActionKind acti
         const auto values = parseModalValues(json);
         if (values.empty()) {
             sendNotice(*submitted, "请输入数量。");
-            openProduct(*submitted, product_key);
+            openDashboardProduct(*submitted, product_key);
             return;
         }
         const auto quantity = parsePositiveInt32(values[0]);
         if (!quantity) {
             sendNotice(*submitted, "数量必须是正整数。");
-            openProduct(*submitted, product_key);
+            openDashboardProduct(*submitted, product_key);
             return;
         }
         std::int64_t unit_price = 0;
         if (needs_price) {
             if (values.size() < 2) {
                 sendNotice(*submitted, "请输入单价。");
-                openProduct(*submitted, product_key);
+                openDashboardProduct(*submitted, product_key);
                 return;
             }
             const auto price = parsePositiveInt64(values[1]);
             if (!price) {
                 sendNotice(*submitted, "单价必须是正整数。");
-                openProduct(*submitted, product_key);
+                openDashboardProduct(*submitted, product_key);
                 return;
             }
             unit_price = *price;
@@ -423,7 +599,7 @@ void ExchangePlugin::openTradeConfirm(endstone::Player& player, ui::ActionKind a
     auto product = repository_->getProduct(product_key);
     if (!product) {
         sendNotice(player, "商品不存在。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
     std::string action_name;
@@ -464,7 +640,7 @@ void ExchangePlugin::openTradeConfirm(endstone::Player& player, ui::ActionKind a
     form.addButton(endstone::ColorFormat::Yellow + "返回", "textures/ui/refresh_light",
                    [this, product_key](endstone::Player* clicked) {
                        if (clicked != nullptr) {
-                           openProduct(*clicked, product_key);
+                           openDashboardProduct(*clicked, product_key);
                        }
                    });
     player.sendForm(std::move(form));
@@ -473,13 +649,35 @@ void ExchangePlugin::openTradeConfirm(endstone::Player& player, ui::ActionKind a
 void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec) {
     endstone::ActionForm form;
     form.setTitle(spec.title).setContent(spec.body);
-    for (const auto& button : spec.buttons) {
+    const auto add_button = [this, &form](const ui::ButtonSpec& button) {
         form.addButton(button.text, button.icon.empty() ? std::nullopt : std::optional<std::string>{button.icon},
                        [this, button](endstone::Player* clicked) {
                            if (clicked != nullptr) {
                                handleAction(*clicked, button);
                            }
                        });
+    };
+    if (!spec.controls.empty()) {
+        for (const auto& control : spec.controls) {
+            switch (control.kind) {
+            case ui::ControlKind::Button:
+                add_button(control.button);
+                break;
+            case ui::ControlKind::Header:
+                form.addHeader(control.text);
+                break;
+            case ui::ControlKind::Label:
+                form.addLabel(control.text);
+                break;
+            case ui::ControlKind::Divider:
+                form.addDivider();
+                break;
+            }
+        }
+    } else {
+        for (const auto& button : spec.buttons) {
+            add_button(button);
+        }
     }
     player.sendForm(std::move(form));
 }
@@ -487,17 +685,36 @@ void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec
 void ExchangePlugin::handleAction(endstone::Player& player, const ui::ButtonSpec& button) {
     try {
         switch (button.action) {
+        case ui::ActionKind::OpenDashboard:
+            openDashboard(player);
+            return;
+        case ui::ActionKind::DashboardCategory:
+            openDashboardCategory(player, button.target);
+            return;
+        case ui::ActionKind::DashboardProduct:
+            openDashboardProduct(player, button.target);
+            return;
+        case ui::ActionKind::DashboardPage: {
+            const auto page = parsePageIndex(button.target);
+            if (!page) {
+                sendNotice(player, "页码无效。");
+                openDashboard(player);
+                return;
+            }
+            openDashboardPage(player, *page);
+            return;
+        }
         case ui::ActionKind::OpenAllProducts:
-            openAllProducts(player);
+            resetDashboard(player);
             return;
         case ui::ActionKind::OpenSearch:
             openSearch(player);
             return;
         case ui::ActionKind::OpenCategory:
-            openCategory(player, button.target);
+            openDashboardCategory(player, button.target);
             return;
         case ui::ActionKind::OpenProduct:
-            openProduct(player, button.target);
+            openDashboardProduct(player, button.target);
             return;
         case ui::ActionKind::OpenOrderBook:
             openOrderBook(player, button.target);
@@ -516,7 +733,7 @@ void ExchangePlugin::handleAction(endstone::Player& player, const ui::ButtonSpec
             }
             auto order = service_->adminCreateSystemSellOrder(playerRef(player), button.target, 64, 1);
             sendNotice(player, "已补货系统卖单 #" + std::to_string(order.id) + "，数量 64，单价 1。");
-            openProduct(player, button.target);
+            openDashboardProduct(player, button.target);
             return;
         }
         case ui::ActionKind::MarketBuy:
@@ -567,20 +784,25 @@ void ExchangePlugin::handleAction(endstone::Player& player, const ui::ButtonSpec
             return;
         case ui::ActionKind::Back:
             if (looksLikeProductKey(button.target)) {
-                openProduct(player, button.target);
+                openDashboardProduct(player, button.target);
             } else {
-                openHome(player);
+                openDashboard(player);
             }
             return;
         case ui::ActionKind::NextPage:
         case ui::ActionKind::PrevPage: {
             const auto [target, page] = parsePageTarget(button.target);
             if (target == "search") {
-                openSearchResults(player, page);
+                openDashboardPage(player, page);
             } else if (target == "all") {
                 openAllProducts(player, page);
             } else {
-                openCategory(player, target, page);
+                auto& state = dashboardState(player);
+                state.category_id = target;
+                state.search_query.clear();
+                state.page = page;
+                state.product_key.clear();
+                openDashboard(player);
             }
             return;
         }
@@ -596,7 +818,7 @@ void ExchangePlugin::executeConfirmedTrade(endstone::Player& player, const std::
     const auto parts = split(payload, '|');
     if (parts.size() != 4) {
         sendNotice(player, "交易参数无效。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
     const auto action = actionFromToken(parts[0]);
@@ -604,14 +826,14 @@ void ExchangePlugin::executeConfirmedTrade(endstone::Player& player, const std::
     const auto unit_price = parsePositiveInt64(parts[3]);
     if (!action || !quantity) {
         sendNotice(player, "交易参数无效。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
 
     const auto product = repository_->getProduct(parts[1]);
     if (!product) {
         sendNotice(player, "商品不存在。");
-        openHome(player);
+        openDashboard(player);
         return;
     }
 
@@ -620,22 +842,24 @@ void ExchangePlugin::executeConfirmedTrade(endstone::Player& player, const std::
     case ui::ActionKind::MarketBuy: {
         const auto order = service_->placeMarketBuy(ref, product->product_key, *quantity);
         sendNotice(player, "市价买入完成，数量 " + std::to_string(order.original_quantity) + "，物品已进入交易所邮箱。");
-        openProduct(player, product->product_key);
+        openDashboardProduct(player, product->product_key);
         return;
     }
     case ui::ActionKind::LimitBuy: {
         if (!unit_price) {
             sendNotice(player, "缺少买单单价。");
+            openDashboardProduct(player, product->product_key);
             return;
         }
         const auto order = service_->placeLimitBuy(ref, product->product_key, *quantity, *unit_price);
         sendNotice(player, "已提交买单 #" + std::to_string(order.id) + "。");
-        openProduct(player, product->product_key);
+        openDashboardProduct(player, product->product_key);
         return;
     }
     case ui::ActionKind::MarketSell:
     case ui::ActionKind::LimitSell: {
         if (!removeInventoryItems(player, *product, *quantity)) {
+            openDashboardProduct(player, product->product_key);
             return;
         }
         try {
@@ -650,7 +874,7 @@ void ExchangePlugin::executeConfirmedTrade(endstone::Player& player, const std::
                 order = service_->placeLimitSell(ref, product->product_key, {snapshotFor(*product, *quantity)}, *unit_price);
                 sendNotice(player, "已提交卖单 #" + std::to_string(order.id) + "。");
             }
-            openProduct(player, product->product_key);
+            openDashboardProduct(player, product->product_key);
         } catch (...) {
             try {
                 player.getInventory().addItem({endstone::ItemStack(endstone::ItemTypeId(product->item_id), *quantity)});
@@ -663,6 +887,7 @@ void ExchangePlugin::executeConfirmedTrade(endstone::Player& player, const std::
     }
     default:
         sendNotice(player, "交易类型无效。");
+        openDashboard(player);
         return;
     }
 }
@@ -749,6 +974,10 @@ std::vector<ui::CategorySpec> ExchangePlugin::categories() const {
         out.push_back({category.id, category.name, category.icon});
     }
     return out;
+}
+
+DashboardState& ExchangePlugin::dashboardState(endstone::Player& player) {
+    return dashboard_states_[player.getUniqueId().str()];
 }
 
 PlayerRef ExchangePlugin::playerRef(endstone::Player& player) const {

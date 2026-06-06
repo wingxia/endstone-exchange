@@ -9,6 +9,10 @@
 namespace exchange::ui {
 
 enum class ActionKind {
+    OpenDashboard,
+    DashboardCategory,
+    DashboardProduct,
+    DashboardPage,
     OpenCategory,
     OpenProduct,
     MarketBuy,
@@ -33,6 +37,13 @@ enum class ActionKind {
     PrevPage
 };
 
+enum class ControlKind {
+    Button,
+    Header,
+    Label,
+    Divider
+};
+
 struct ButtonSpec {
     std::string text;
     std::string icon;
@@ -40,10 +51,17 @@ struct ButtonSpec {
     std::string target;
 };
 
+struct ControlSpec {
+    ControlKind kind{ControlKind::Button};
+    std::string text;
+    ButtonSpec button;
+};
+
 struct FormSpec {
     std::string title;
     std::string body;
     std::vector<ButtonSpec> buttons;
+    std::vector<ControlSpec> controls;
 };
 
 struct CategorySpec {
@@ -57,10 +75,31 @@ struct ProductView {
     Quote quote;
 };
 
+struct DashboardProductView {
+    Product product;
+    Quote quote;
+    bool selected{false};
+};
+
+struct DashboardView {
+    std::vector<CategorySpec> categories;
+    std::string active_category_id;
+    std::string active_category_name;
+    std::vector<DashboardProductView> products;
+    std::size_t page{0};
+    std::size_t total_pages{1};
+    std::size_t total_products{0};
+    std::optional<ProductView> selected_product;
+    std::optional<std::int64_t> balance;
+    bool admin{false};
+    std::string search_query;
+};
+
 class ExchangeUiModel {
 public:
     explicit ExchangeUiModel(std::size_t page_size = 18);
 
+    FormSpec dashboard(const DashboardView& view) const;
     FormSpec home(const std::vector<CategorySpec>& categories, bool admin, std::optional<std::int64_t> balance = std::nullopt) const;
     FormSpec categoryPage(const CategorySpec& category, const std::vector<Product>& products, std::size_t page) const;
     FormSpec searchResults(const std::string& query, const std::vector<Product>& products, std::size_t page) const;

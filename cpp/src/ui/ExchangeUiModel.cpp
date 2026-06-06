@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <sstream>
+#include <utility>
 
 namespace exchange::ui {
 namespace {
@@ -51,9 +52,110 @@ bool openStatus(OrderStatus status) {
     return status == OrderStatus::Open || status == OrderStatus::Partial;
 }
 
+void addButton(FormSpec& form, ButtonSpec button) {
+    form.buttons.push_back(button);
+    form.controls.push_back({ControlKind::Button, "", std::move(button)});
+}
+
+void addHeader(FormSpec& form, std::string text) {
+    form.controls.push_back({ControlKind::Header, std::move(text), {}});
+}
+
+void addLabel(FormSpec& form, std::string text) {
+    form.controls.push_back({ControlKind::Label, std::move(text), {}});
+}
+
+void addDivider(FormSpec& form) {
+    form.controls.push_back({ControlKind::Divider, "", {}});
+}
+
+std::string productQuoteLine(const Quote& quote) {
+    std::ostringstream out;
+    out << "买 " << money(quote.best_bid) << " / 卖 " << money(quote.best_ask)
+        << " / 成交 " << money(quote.last_price);
+    return out.str();
+}
+
 }  // namespace
 
 ExchangeUiModel::ExchangeUiModel(std::size_t page_size) : page_size_(std::max<std::size_t>(6, page_size)) {}
+
+FormSpec ExchangeUiModel::dashboard(const DashboardView& view) const {
+    FormSpec form;
+    form.title = "Exchange Dashboard";
+    std::ostringstream body;
+    body << "余额: " << money(view.balance)
+         << "\n分类: " << (view.active_category_name.empty() ? "-" : view.active_category_name)
+         << "\n商品页: " << (view.page + 1) << " / " << std::max<std::size_t>(1, view.total_pages)
+         << "\n结果数: " << view.total_products;
+    if (!view.search_query.empty()) {
+        body << "\n搜索: " << view.search_query;
+    }
+    body << "\n\n下单面板";
+    if (view.selected_product) {
+        const auto& selected = *view.selected_product;
+        body << "\n商品: " << selected.product.display_name
+             << "\n物品ID: " << selected.product.item_id
+             << "\n最高买价: " << money(selected.quote.best_bid)
+             << "\n最低卖价: " << money(selected.quote.best_ask)
+             << "\n差价: " << spread(selected.quote)
+             << "\n买方需求: " << selected.quote.bid_quantity
+             << "\n卖方库存: " << selected.quote.ask_quantity
+             << "\n最近成交: " << money(selected.quote.last_price);
+    } else {
+        body << "\n当前分类没有可交易商品。";
+    }
+    form.body = body.str();
+
+    addHeader(form, "下单区");
+    if (view.selected_product) {
+        const auto& key = view.selected_product->product.product_key;
+        addButton(form, {"买入 - 市价", "textures/items/emerald", ActionKind::MarketBuy, key});
+        addButton(form, {"买入 - 挂单", "textures/items/paper", ActionKind::LimitBuy, key});
+        addButton(form, {"卖出 - 市价", "textures/items/chest", ActionKind::MarketSell, key});
+        addButton(form, {"卖出 - 挂单", "textures/items/writable_book", ActionKind::LimitSell, key});
+        addButton(form, {"订单簿", "textures/items/book_normal", ActionKind::OpenOrderBook, key});
+    } else {
+        addLabel(form, "无可下单商品");
+    }
+
+    addDivider(form);
+    addHeader(form, "分类区");
+    for (const auto& category : view.categories) {
+        const auto selected = view.search_query.empty() && category.id == view.active_category_id;
+        addButton(form, {(selected ? "[当前] " : "") + category.name, category.icon, ActionKind::DashboardCategory, category.id});
+    }
+
+    addDivider(form);
+    addHeader(form, "商品区");
+    if (view.page > 0) {
+        addButton(form, {"上一页", "textures/ui/arrow_left", ActionKind::DashboardPage, std::to_string(view.page - 1)});
+    }
+    for (const auto& product_view : view.products) {
+        std::ostringstream label;
+        if (product_view.selected) {
+            label << "[选中] ";
+        }
+        label << product_view.product.display_name
+              << "\n" << product_view.product.item_id
+              << "\n" << productQuoteLine(product_view.quote);
+        addButton(form, {label.str(), product_view.product.icon, ActionKind::DashboardProduct, product_view.product.product_key});
+    }
+    if (view.page + 1 < view.total_pages) {
+        addButton(form, {"下一页", "textures/ui/arrow_right", ActionKind::DashboardPage, std::to_string(view.page + 1)});
+    }
+
+    addDivider(form);
+    addHeader(form, "工具区");
+    addButton(form, {"搜索物品", "textures/ui/magnifyingGlass", ActionKind::OpenSearch, ""});
+    addButton(form, {"重置分类", "textures/items/book_normal", ActionKind::OpenAllProducts, ""});
+    addButton(form, {"我的订单", "textures/items/paper", ActionKind::OpenMyOrders, ""});
+    addButton(form, {"邮箱领取", "textures/items/minecart_chest", ActionKind::OpenMailbox, ""});
+    if (view.admin) {
+        addButton(form, {"管理员", "textures/items/gold_ingot", ActionKind::OpenAdmin, ""});
+    }
+    return form;
+}
 
 FormSpec ExchangeUiModel::home(const std::vector<CategorySpec>& categories, bool admin, std::optional<std::int64_t> balance) const {
     FormSpec form;

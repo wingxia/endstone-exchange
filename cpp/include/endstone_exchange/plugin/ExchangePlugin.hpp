@@ -15,6 +15,13 @@
 
 namespace exchange::plugin {
 
+struct DashboardState {
+    std::string category_id;
+    std::size_t page{0};
+    std::string product_key;
+    std::string search_query;
+};
+
 class ExchangePlugin : public endstone::Plugin {
 public:
     void onEnable() override;
@@ -24,6 +31,11 @@ public:
 private:
     void seedCatalog();
     void openHome(endstone::Player& player);
+    void openDashboard(endstone::Player& player);
+    void openDashboardCategory(endstone::Player& player, const std::string& category_id);
+    void openDashboardProduct(endstone::Player& player, const std::string& product_key);
+    void openDashboardPage(endstone::Player& player, std::size_t page);
+    void resetDashboard(endstone::Player& player);
     void openCategory(endstone::Player& player, const std::string& category_id, std::size_t page = 0);
     void openAllProducts(endstone::Player& player, std::size_t page = 0);
     void openSearch(endstone::Player& player);
@@ -42,6 +54,7 @@ private:
     void claimAllMailbox(endstone::Player& player);
     void sendNotice(endstone::Player& player, const std::string& message);
     std::vector<ui::CategorySpec> categories() const;
+    DashboardState& dashboardState(endstone::Player& player);
     PlayerRef playerRef(endstone::Player& player) const;
     ItemSnapshot snapshotFor(const Product& product, std::int32_t quantity) const;
     bool removeInventoryItems(endstone::Player& player, const Product& product, std::int32_t quantity);
@@ -52,6 +65,7 @@ private:
     std::unique_ptr<ExchangeService> service_;
     ui::ExchangeUiModel ui_{18};
     std::unordered_map<std::string, std::string> search_queries_;
+    std::unordered_map<std::string, DashboardState> dashboard_states_;
 };
 
 }  // namespace exchange::plugin

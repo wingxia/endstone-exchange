@@ -206,71 +206,107 @@ void test_mailbox_claim_marks_item() {
     assert(failed);
 }
 
-void test_ui_model_contains_expected_actions() {
-    ui::ExchangeUiModel model(8);
+ui::DashboardView sampleDashboardView() {
     const std::vector<ui::CategorySpec> categories{
         {"building", "建筑方块", "textures/blocks/stone"},
         {"ores", "矿物材料", "textures/items/diamond"},
     };
-    const auto form = model.home(categories, true);
-    assert(form.title.find("选择区") != std::string::npos);
-    assert(form.body.find("物品选择区") != std::string::npos);
-    assert(form.buttons.size() == categories.size() + 5);
-    assert(form.buttons[0].action == ui::ActionKind::OpenCategory);
-    assert(form.buttons[0].target == "building");
-    assert(form.buttons[0].icon == "textures/blocks/stone");
-    assert(form.buttons[1].action == ui::ActionKind::OpenCategory);
-    assert(form.buttons[1].target == "ores");
-    assert(form.buttons[1].icon == "textures/items/diamond");
-    assert(form.buttons[2].action == ui::ActionKind::OpenSearch);
-    assert(form.buttons[3].action == ui::ActionKind::OpenAllProducts);
-    assert(form.buttons[4].action == ui::ActionKind::OpenMyOrders);
-    assert(form.buttons[5].action == ui::ActionKind::OpenMailbox);
-    assert(form.buttons[6].action == ui::ActionKind::OpenAdmin);
+    auto stone = productFor("minecraft:stone");
+    stone.category = "building";
+    stone.icon = "textures/blocks/stone";
+    auto diamond = productFor("minecraft:diamond");
+    diamond.category = "building";
+    diamond.icon = "textures/items/diamond";
+    return ui::DashboardView{
+        categories,
+        "building",
+        "建筑方块",
+        {
+            ui::DashboardProductView{stone, Quote{stone.product_key, 3, 5, 12, 8, 4}, false},
+            ui::DashboardProductView{diamond, Quote{diamond.product_key, 10, 12, 5, 7, 11}, true},
+        },
+        1,
+        3,
+        28,
+        ui::ProductView{diamond, Quote{diamond.product_key, 10, 12, 5, 7, 11}},
+        1000,
+        true,
+        ""};
 }
 
-void test_ui_model_search_results_page_targets() {
+void test_ui_model_dashboard_sections_and_trade_actions() {
     ui::ExchangeUiModel model(6);
-    const auto diamond = productFor("minecraft:diamond");
-    const auto stone = productFor("minecraft:stone");
-    const auto bread = productFor("minecraft:bread");
-    const auto apple = productFor("minecraft:apple");
-    const auto coal = productFor("minecraft:coal");
-    const auto emerald = productFor("minecraft:emerald");
-    const auto iron = productFor("minecraft:iron_ingot");
-    const auto form = model.searchResults("stone", {diamond, stone, bread, apple, coal, emerald, iron}, 0);
-    assert(form.buttons.size() == 8);
-    assert(form.title.find("选择区") != std::string::npos);
-    assert(form.body.find("下单区") != std::string::npos);
-    assert(form.buttons[0].action == ui::ActionKind::OpenProduct);
-    assert(form.buttons[0].text.find("minecraft:diamond") != std::string::npos);
-    assert(!form.buttons[0].icon.empty());
-    assert(form.buttons[6].action == ui::ActionKind::NextPage);
-    assert(form.buttons[6].target == "search|1");
-}
+    const auto view = sampleDashboardView();
+    const auto form = model.dashboard(view);
 
-void test_ui_model_product_page_order_ticket_actions() {
-    ui::ExchangeUiModel model(8);
-    const auto product = productFor("minecraft:diamond");
-    const Quote quote{product.product_key, 10, 12, 5, 7, 11};
-    const auto form = model.productPage(ui::ProductView{product, quote});
-
-    assert(form.title.find("下单区") != std::string::npos);
-    assert(form.body.find("右侧 | 行情与下单") != std::string::npos);
+    assert(form.title == "Exchange Dashboard");
+    assert(form.body.find("下单面板") != std::string::npos);
+    assert(form.body.find("余额: 1000") != std::string::npos);
+    assert(form.body.find("分类: 建筑方块") != std::string::npos);
     assert(form.body.find("最高买价: 10") != std::string::npos);
     assert(form.body.find("最低卖价: 12") != std::string::npos);
     assert(form.body.find("最近成交: 11") != std::string::npos);
-    assert(form.buttons.size() == 6);
+    assert(form.controls.size() > form.buttons.size());
+    assert(form.controls[0].kind == ui::ControlKind::Header);
+    assert(form.controls[0].text == "下单区");
     assert(form.buttons[0].action == ui::ActionKind::MarketBuy);
     assert(form.buttons[1].action == ui::ActionKind::LimitBuy);
     assert(form.buttons[2].action == ui::ActionKind::MarketSell);
     assert(form.buttons[3].action == ui::ActionKind::LimitSell);
     assert(form.buttons[4].action == ui::ActionKind::OpenOrderBook);
-    assert(form.buttons[5].action == ui::ActionKind::Back);
     for (std::size_t i = 0; i < 5; ++i) {
-        assert(form.buttons[i].target == product.product_key);
+        assert(form.buttons[i].target == view.selected_product->product.product_key);
         assert(!form.buttons[i].icon.empty());
     }
+}
+
+void test_ui_model_dashboard_category_and_product_controls() {
+    ui::ExchangeUiModel model(6);
+    const auto view = sampleDashboardView();
+    const auto form = model.dashboard(view);
+
+    const auto has_header = [&](const std::string& text) {
+        return std::any_of(form.controls.begin(), form.controls.end(), [&](const ui::ControlSpec& control) {
+            return control.kind == ui::ControlKind::Header && control.text == text;
+        });
+    };
+    assert(has_header("下单区"));
+    assert(has_header("分类区"));
+    assert(has_header("商品区"));
+    assert(has_header("工具区"));
+
+    assert(form.buttons[5].action == ui::ActionKind::DashboardCategory);
+    assert(form.buttons[5].target == "building");
+    assert(form.buttons[5].text.find("[当前]") != std::string::npos);
+    assert(form.buttons[5].icon == "textures/blocks/stone");
+    assert(form.buttons[6].action == ui::ActionKind::DashboardCategory);
+    assert(form.buttons[6].target == "ores");
+    assert(form.buttons[6].icon == "textures/items/diamond");
+
+    assert(form.buttons[8].action == ui::ActionKind::DashboardProduct);
+    assert(form.buttons[8].text.find("minecraft:stone") != std::string::npos);
+    assert(form.buttons[8].text.find("买 3 / 卖 5") != std::string::npos);
+    assert(form.buttons[8].icon == "textures/blocks/stone");
+    assert(form.buttons[9].action == ui::ActionKind::DashboardProduct);
+    assert(form.buttons[9].text.find("[选中]") != std::string::npos);
+    assert(form.buttons[9].text.find("minecraft:diamond") != std::string::npos);
+    assert(form.buttons[9].target == view.selected_product->product.product_key);
+    assert(form.buttons[9].icon == "textures/items/diamond");
+}
+
+void test_ui_model_dashboard_pagination_and_tools() {
+    ui::ExchangeUiModel model(6);
+    const auto form = model.dashboard(sampleDashboardView());
+
+    assert(form.buttons[7].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[7].target == "0");
+    assert(form.buttons[10].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[10].target == "2");
+    assert(form.buttons[11].action == ui::ActionKind::OpenSearch);
+    assert(form.buttons[12].action == ui::ActionKind::OpenAllProducts);
+    assert(form.buttons[13].action == ui::ActionKind::OpenMyOrders);
+    assert(form.buttons[14].action == ui::ActionKind::OpenMailbox);
+    assert(form.buttons[15].action == ui::ActionKind::OpenAdmin);
 }
 
 }  // namespace
@@ -285,9 +321,9 @@ int main() {
     test_generated_catalog_is_searchable();
     test_generated_catalog_has_complete_categories_and_icons();
     test_mailbox_claim_marks_item();
-    test_ui_model_contains_expected_actions();
-    test_ui_model_search_results_page_targets();
-    test_ui_model_product_page_order_ticket_actions();
+    test_ui_model_dashboard_sections_and_trade_actions();
+    test_ui_model_dashboard_category_and_product_controls();
+    test_ui_model_dashboard_pagination_and_tools();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }
