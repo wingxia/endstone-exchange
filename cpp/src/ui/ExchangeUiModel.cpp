@@ -76,25 +76,31 @@ std::string productQuoteLine(const Quote& quote) {
     return out.str();
 }
 
+ButtonSpec emptySlot() {
+    return {" ", "", ActionKind::Noop, ""};
+}
+
 }  // namespace
 
 ExchangeUiModel::ExchangeUiModel(std::size_t page_size) : page_size_(std::max<std::size_t>(6, page_size)) {}
 
 FormSpec ExchangeUiModel::dashboard(const DashboardView& view) const {
     FormSpec form;
-    form.title = "Exchange Dashboard";
+    form.title = "Exchange Chest UI";
     std::ostringstream body;
-    body << "余额: " << money(view.balance)
+    body << "Exchange | 箱子式交易面板"
+         << "\n余额: " << money(view.balance)
          << "\n分类: " << (view.active_category_name.empty() ? "-" : view.active_category_name)
+         << "\n分类组: " << (view.category_page + 1) << " / " << std::max<std::size_t>(1, view.total_category_pages)
          << "\n商品页: " << (view.page + 1) << " / " << std::max<std::size_t>(1, view.total_pages)
          << "\n结果数: " << view.total_products;
     if (!view.search_query.empty()) {
         body << "\n搜索: " << view.search_query;
     }
-    body << "\n\n下单面板";
     if (view.selected_product) {
         const auto& selected = *view.selected_product;
-        body << "\n商品: " << selected.product.display_name
+        body << "\n\n当前商品"
+             << "\n商品: " << selected.product.display_name
              << "\n物品ID: " << selected.product.item_id
              << "\n最高买价: " << money(selected.quote.best_bid)
              << "\n最低卖价: " << money(selected.quote.best_ask)
@@ -107,31 +113,27 @@ FormSpec ExchangeUiModel::dashboard(const DashboardView& view) const {
     }
     form.body = body.str();
 
-    addHeader(form, "下单区");
-    if (view.selected_product) {
-        const auto& key = view.selected_product->product.product_key;
-        addButton(form, {"买入 - 市价", "textures/items/emerald", ActionKind::MarketBuy, key});
-        addButton(form, {"买入 - 挂单", "textures/items/paper", ActionKind::LimitBuy, key});
-        addButton(form, {"卖出 - 市价", "textures/items/chest", ActionKind::MarketSell, key});
-        addButton(form, {"卖出 - 挂单", "textures/items/writable_book", ActionKind::LimitSell, key});
-        addButton(form, {"订单簿", "textures/items/book_normal", ActionKind::OpenOrderBook, key});
-    } else {
-        addLabel(form, "无可下单商品");
+    const auto category_page_count = std::max<std::size_t>(1, view.total_category_pages);
+    const auto category_nav_target = view.category_page + 1 < category_page_count ? view.category_page + 1 : 0;
+    for (std::size_t slot = 0; slot < dashboard_layout::kCategorySlots; ++slot) {
+        if (slot < view.categories.size()) {
+            const auto& category = view.categories[slot];
+            const auto selected = view.search_query.empty() && category.id == view.active_category_id;
+            addButton(form, {(selected ? "[当前] " : "") + category.name, category.icon, ActionKind::DashboardCategory, category.id});
+        } else if (slot + 1 == dashboard_layout::kCategorySlots && category_page_count > 1) {
+            addButton(form, {"更多分类\n" + std::to_string(category_nav_target + 1) + " / " + std::to_string(category_page_count),
+                             "textures/ui/arrow_right", ActionKind::DashboardCategoryPage, std::to_string(category_nav_target)});
+        } else {
+            addButton(form, emptySlot());
+        }
     }
 
-    addDivider(form);
-    addHeader(form, "分类区");
-    for (const auto& category : view.categories) {
-        const auto selected = view.search_query.empty() && category.id == view.active_category_id;
-        addButton(form, {(selected ? "[当前] " : "") + category.name, category.icon, ActionKind::DashboardCategory, category.id});
-    }
-
-    addDivider(form);
-    addHeader(form, "商品区");
-    if (view.page > 0) {
-        addButton(form, {"上一页", "textures/ui/arrow_left", ActionKind::DashboardPage, std::to_string(view.page - 1)});
-    }
-    for (const auto& product_view : view.products) {
+    for (std::size_t slot = 0; slot < dashboard_layout::kProductSlots; ++slot) {
+        if (slot >= view.products.size()) {
+            addButton(form, emptySlot());
+            continue;
+        }
+        const auto& product_view = view.products[slot];
         std::ostringstream label;
         if (product_view.selected) {
             label << "[选中] ";
@@ -141,18 +143,48 @@ FormSpec ExchangeUiModel::dashboard(const DashboardView& view) const {
               << "\n" << productQuoteLine(product_view.quote);
         addButton(form, {label.str(), product_view.product.icon, ActionKind::DashboardProduct, product_view.product.product_key});
     }
+
+    if (view.page > 0) {
+        addButton(form, {"上一页", "textures/ui/arrow_left", ActionKind::DashboardPage, std::to_string(view.page - 1)});
+    } else {
+        addButton(form, {"上一页", "textures/ui/arrow_left", ActionKind::Noop, ""});
+    }
     if (view.page + 1 < view.total_pages) {
         addButton(form, {"下一页", "textures/ui/arrow_right", ActionKind::DashboardPage, std::to_string(view.page + 1)});
+    } else {
+        addButton(form, {"下一页", "textures/ui/arrow_right", ActionKind::Noop, ""});
     }
-
-    addDivider(form);
-    addHeader(form, "工具区");
     addButton(form, {"搜索物品", "textures/ui/magnifyingGlass", ActionKind::OpenSearch, ""});
-    addButton(form, {"重置分类", "textures/items/book_normal", ActionKind::OpenAllProducts, ""});
+    addButton(form, {"全部物品", "textures/items/book_normal", ActionKind::OpenAllProducts, ""});
     addButton(form, {"我的订单", "textures/items/paper", ActionKind::OpenMyOrders, ""});
     addButton(form, {"邮箱领取", "textures/items/minecart_chest", ActionKind::OpenMailbox, ""});
     if (view.admin) {
         addButton(form, {"管理员", "textures/items/gold_ingot", ActionKind::OpenAdmin, ""});
+    } else {
+        addButton(form, {"管理员", "textures/items/gold_ingot", ActionKind::Noop, ""});
+    }
+
+    const auto selected_key = view.selected_product ? view.selected_product->product.product_key : std::string{};
+    if (view.selected_product) {
+        addButton(form, {"买入 - 市价", "textures/items/emerald", ActionKind::MarketBuy, selected_key});
+        addButton(form, {"买入 - 挂单", "textures/items/paper", ActionKind::LimitBuy, selected_key});
+        addButton(form, {"卖出 - 市价", "textures/items/chest", ActionKind::MarketSell, selected_key});
+        addButton(form, {"卖出 - 挂单", "textures/items/writable_book", ActionKind::LimitSell, selected_key});
+        addButton(form, {"订单簿", "textures/items/book_normal", ActionKind::OpenOrderBook, selected_key});
+    } else {
+        addButton(form, {"买入 - 市价", "textures/items/emerald", ActionKind::Noop, ""});
+        addButton(form, {"买入 - 挂单", "textures/items/paper", ActionKind::Noop, ""});
+        addButton(form, {"卖出 - 市价", "textures/items/chest", ActionKind::Noop, ""});
+        addButton(form, {"卖出 - 挂单", "textures/items/writable_book", ActionKind::Noop, ""});
+        addButton(form, {"订单簿", "textures/items/book_normal", ActionKind::Noop, ""});
+    }
+
+    while (form.buttons.size() < dashboard_layout::kTotalButtons) {
+        addButton(form, emptySlot());
+    }
+    if (form.buttons.size() > dashboard_layout::kTotalButtons) {
+        form.buttons.resize(dashboard_layout::kTotalButtons);
+        form.controls.resize(dashboard_layout::kTotalButtons);
     }
     return form;
 }

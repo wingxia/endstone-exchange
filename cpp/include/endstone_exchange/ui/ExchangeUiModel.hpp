@@ -9,10 +9,12 @@
 namespace exchange::ui {
 
 enum class ActionKind {
+    Noop,
     OpenDashboard,
     DashboardCategory,
     DashboardProduct,
     DashboardPage,
+    DashboardCategoryPage,
     OpenCategory,
     OpenProduct,
     MarketBuy,
@@ -85,6 +87,8 @@ struct DashboardView {
     std::vector<CategorySpec> categories;
     std::string active_category_id;
     std::string active_category_name;
+    std::size_t category_page{0};
+    std::size_t total_category_pages{1};
     std::vector<DashboardProductView> products;
     std::size_t page{0};
     std::size_t total_pages{1};
@@ -94,6 +98,21 @@ struct DashboardView {
     bool admin{false};
     std::string search_query;
 };
+
+namespace dashboard_layout {
+
+inline constexpr std::size_t kCategorySlots = 9;
+inline constexpr std::size_t kProductSlots = 28;
+inline constexpr std::size_t kToolSlots = 7;
+inline constexpr std::size_t kTradeSlots = 5;
+
+inline constexpr std::size_t kCategoryStart = 0;
+inline constexpr std::size_t kProductStart = kCategoryStart + kCategorySlots;
+inline constexpr std::size_t kToolStart = kProductStart + kProductSlots;
+inline constexpr std::size_t kTradeStart = kToolStart + kToolSlots;
+inline constexpr std::size_t kTotalButtons = kTradeStart + kTradeSlots;
+
+}  // namespace dashboard_layout
 
 class ExchangeUiModel {
 public:

@@ -21,7 +21,7 @@
 namespace exchange::plugin {
 namespace {
 
-constexpr std::size_t kDashboardPageSize = 12;
+constexpr std::size_t kDashboardPageSize = ui::dashboard_layout::kProductSlots;
 
 struct BridgeConfig {
     std::string host{"127.0.0.1"};
@@ -282,7 +282,7 @@ void ExchangePlugin::openDashboard(endstone::Player& player) {
     auto all_categories = categories();
     auto& state = dashboardState(player);
     if (all_categories.empty()) {
-        sendForm(player, ui_.dashboard(ui::DashboardView{{}, "", "", {}, 0, 1, 0, std::nullopt, balance, player.hasPermission("exchange.admin"), state.search_query}));
+        sendForm(player, ui_.dashboard(ui::DashboardView{{}, "", "", 0, 1, {}, 0, 1, 0, std::nullopt, balance, player.hasPermission("exchange.admin"), state.search_query}));
         return;
     }
 
@@ -291,10 +291,36 @@ void ExchangePlugin::openDashboard(endstone::Player& player) {
             return category.id == category_id;
         });
     };
-    if (state.search_query.empty() && (state.category_id.empty() || !category_exists(state.category_id))) {
-        state.category_id = all_categories.front().id;
+    if (state.search_query.empty() && !state.category_id.empty() && !category_exists(state.category_id)) {
+        state.category_id.clear();
+        state.category_page = 0;
         state.page = 0;
         state.product_key.clear();
+    }
+
+    const auto category_page_size = all_categories.size() > ui::dashboard_layout::kCategorySlots
+                                        ? ui::dashboard_layout::kCategorySlots - 1
+                                        : ui::dashboard_layout::kCategorySlots;
+    const auto total_category_pages = std::max<std::size_t>(1, (all_categories.size() + category_page_size - 1) / category_page_size);
+    if (state.category_page >= total_category_pages) {
+        state.category_page = total_category_pages - 1;
+    }
+    const auto active_category_it = std::find_if(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
+        return category.id == state.category_id;
+    });
+    if (active_category_it != all_categories.end()) {
+        const auto active_index = static_cast<std::size_t>(std::distance(all_categories.begin(), active_category_it));
+        const auto active_page = active_index / category_page_size;
+        if (active_page != state.category_page) {
+            state.category_page = active_page;
+        }
+    }
+    const auto category_start = std::min(all_categories.size(), state.category_page * category_page_size);
+    const auto category_end = std::min(all_categories.size(), category_start + category_page_size);
+    std::vector<ui::CategorySpec> visible_categories;
+    visible_categories.reserve(category_end - category_start);
+    for (std::size_t i = category_start; i < category_end; ++i) {
+        visible_categories.push_back(all_categories[i]);
     }
 
     std::vector<Product> products;
@@ -302,6 +328,9 @@ void ExchangePlugin::openDashboard(endstone::Player& player) {
     if (!state.search_query.empty()) {
         products = service_->searchCatalog(state.search_query);
         active_category_name = "搜索结果";
+    } else if (state.category_id.empty()) {
+        products = service_->getCatalog(std::nullopt);
+        active_category_name = "全部物品";
     } else {
         products = service_->getCatalog(state.category_id);
         auto category_it = std::find_if(all_categories.begin(), all_categories.end(), [&](const ui::CategorySpec& category) {
@@ -339,9 +368,11 @@ void ExchangePlugin::openDashboard(endstone::Player& player) {
     }
 
     sendForm(player, ui_.dashboard(ui::DashboardView{
-                         all_categories,
+                         visible_categories,
                          state.category_id,
                          active_category_name,
+                         state.category_page,
+                         total_category_pages,
                          product_views,
                          state.page,
                          total_pages,
@@ -365,9 +396,16 @@ void ExchangePlugin::openDashboardCategory(endstone::Player& player, const std::
     auto& state = dashboardState(player);
     state.category_id = category_id;
     state.search_query.clear();
+    state.category_page = 0;
     state.page = 0;
     state.product_key.clear();
     search_queries_.erase(player.getUniqueId().str());
+    openDashboard(player);
+}
+
+void ExchangePlugin::openDashboardCategoryPage(endstone::Player& player, std::size_t page) {
+    auto& state = dashboardState(player);
+    state.category_page = page;
     openDashboard(player);
 }
 
@@ -391,6 +429,7 @@ void ExchangePlugin::openDashboardProduct(endstone::Player& player, const std::s
         state.search_query.clear();
         search_queries_.erase(player.getUniqueId().str());
         state.category_id = product->category;
+        state.category_page = 0;
         products = service_->getCatalog(state.category_id);
         it = std::find_if(products.begin(), products.end(), [&](const Product& candidate) {
             return candidate.product_key == product_key;
@@ -414,6 +453,7 @@ void ExchangePlugin::openDashboardPage(endstone::Player& player, std::size_t pag
 void ExchangePlugin::resetDashboard(endstone::Player& player) {
     auto& state = dashboardState(player);
     state.category_id.clear();
+    state.category_page = 0;
     state.page = 0;
     state.product_key.clear();
     state.search_query.clear();
@@ -434,6 +474,7 @@ void ExchangePlugin::openCategory(endstone::Player& player, const std::string& c
     auto& state = dashboardState(player);
     state.category_id = category_id;
     state.search_query.clear();
+    state.category_page = 0;
     state.page = page;
     state.product_key.clear();
     search_queries_.erase(player.getUniqueId().str());
@@ -444,6 +485,7 @@ void ExchangePlugin::openAllProducts(endstone::Player& player, std::size_t page)
     auto& state = dashboardState(player);
     state.category_id.clear();
     state.search_query.clear();
+    state.category_page = 0;
     state.page = page;
     state.product_key.clear();
     search_queries_.erase(player.getUniqueId().str());
@@ -470,6 +512,7 @@ void ExchangePlugin::openSearch(endstone::Player& player) {
         auto& state = dashboardState(*submitted);
         state.search_query = trim(values[0]);
         state.category_id.clear();
+        state.category_page = 0;
         state.page = 0;
         state.product_key.clear();
         search_queries_[submitted->getUniqueId().str()] = state.search_query;
@@ -487,6 +530,7 @@ void ExchangePlugin::openSearchResults(endstone::Player& player, std::size_t pag
     auto& state = dashboardState(player);
     state.search_query = it->second;
     state.category_id.clear();
+    state.category_page = 0;
     state.page = page;
     state.product_key.clear();
     openDashboard(player);
@@ -685,12 +729,25 @@ void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec
 void ExchangePlugin::handleAction(endstone::Player& player, const ui::ButtonSpec& button) {
     try {
         switch (button.action) {
+        case ui::ActionKind::Noop:
+            openDashboard(player);
+            return;
         case ui::ActionKind::OpenDashboard:
             openDashboard(player);
             return;
         case ui::ActionKind::DashboardCategory:
             openDashboardCategory(player, button.target);
             return;
+        case ui::ActionKind::DashboardCategoryPage: {
+            const auto page = parsePageIndex(button.target);
+            if (!page) {
+                sendNotice(player, "分类页码无效。");
+                openDashboard(player);
+                return;
+            }
+            openDashboardCategoryPage(player, *page);
+            return;
+        }
         case ui::ActionKind::DashboardProduct:
             openDashboardProduct(player, button.target);
             return;

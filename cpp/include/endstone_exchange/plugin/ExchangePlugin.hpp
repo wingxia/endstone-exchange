@@ -17,6 +17,7 @@ namespace exchange::plugin {
 
 struct DashboardState {
     std::string category_id;
+    std::size_t category_page{0};
     std::size_t page{0};
     std::string product_key;
     std::string search_query;
@@ -33,6 +34,7 @@ private:
     void openHome(endstone::Player& player);
     void openDashboard(endstone::Player& player);
     void openDashboardCategory(endstone::Player& player, const std::string& category_id);
+    void openDashboardCategoryPage(endstone::Player& player, std::size_t page);
     void openDashboardProduct(endstone::Player& player, const std::string& product_key);
     void openDashboardPage(endstone::Player& player, std::size_t page);
     void resetDashboard(endstone::Player& player);

@@ -221,6 +221,8 @@ ui::DashboardView sampleDashboardView() {
         categories,
         "building",
         "建筑方块",
+        0,
+        1,
         {
             ui::DashboardProductView{stone, Quote{stone.product_key, 3, 5, 12, 8, 4}, false},
             ui::DashboardProductView{diamond, Quote{diamond.product_key, 10, 12, 5, 7, 11}, true},
@@ -239,22 +241,24 @@ void test_ui_model_dashboard_sections_and_trade_actions() {
     const auto view = sampleDashboardView();
     const auto form = model.dashboard(view);
 
-    assert(form.title == "Exchange Dashboard");
-    assert(form.body.find("下单面板") != std::string::npos);
+    assert(form.title == "Exchange Chest UI");
+    assert(form.body.find("箱子式交易面板") != std::string::npos);
     assert(form.body.find("余额: 1000") != std::string::npos);
     assert(form.body.find("分类: 建筑方块") != std::string::npos);
+    assert(form.body.find("分类组: 1 / 1") != std::string::npos);
     assert(form.body.find("最高买价: 10") != std::string::npos);
     assert(form.body.find("最低卖价: 12") != std::string::npos);
     assert(form.body.find("最近成交: 11") != std::string::npos);
-    assert(form.controls.size() > form.buttons.size());
-    assert(form.controls[0].kind == ui::ControlKind::Header);
-    assert(form.controls[0].text == "下单区");
-    assert(form.buttons[0].action == ui::ActionKind::MarketBuy);
-    assert(form.buttons[1].action == ui::ActionKind::LimitBuy);
-    assert(form.buttons[2].action == ui::ActionKind::MarketSell);
-    assert(form.buttons[3].action == ui::ActionKind::LimitSell);
-    assert(form.buttons[4].action == ui::ActionKind::OpenOrderBook);
-    for (std::size_t i = 0; i < 5; ++i) {
+    assert(form.buttons.size() == ui::dashboard_layout::kTotalButtons);
+    assert(form.controls.size() == ui::dashboard_layout::kTotalButtons);
+
+    const auto trade_start = ui::dashboard_layout::kTradeStart;
+    assert(form.buttons[trade_start].action == ui::ActionKind::MarketBuy);
+    assert(form.buttons[trade_start + 1].action == ui::ActionKind::LimitBuy);
+    assert(form.buttons[trade_start + 2].action == ui::ActionKind::MarketSell);
+    assert(form.buttons[trade_start + 3].action == ui::ActionKind::LimitSell);
+    assert(form.buttons[trade_start + 4].action == ui::ActionKind::OpenOrderBook);
+    for (std::size_t i = trade_start; i < trade_start + ui::dashboard_layout::kTradeSlots; ++i) {
         assert(form.buttons[i].target == view.selected_product->product.product_key);
         assert(!form.buttons[i].icon.empty());
     }
@@ -265,48 +269,60 @@ void test_ui_model_dashboard_category_and_product_controls() {
     const auto view = sampleDashboardView();
     const auto form = model.dashboard(view);
 
-    const auto has_header = [&](const std::string& text) {
-        return std::any_of(form.controls.begin(), form.controls.end(), [&](const ui::ControlSpec& control) {
-            return control.kind == ui::ControlKind::Header && control.text == text;
-        });
-    };
-    assert(has_header("下单区"));
-    assert(has_header("分类区"));
-    assert(has_header("商品区"));
-    assert(has_header("工具区"));
+    const auto category_start = ui::dashboard_layout::kCategoryStart;
+    assert(form.buttons[category_start].action == ui::ActionKind::DashboardCategory);
+    assert(form.buttons[category_start].target == "building");
+    assert(form.buttons[category_start].text.find("[当前]") != std::string::npos);
+    assert(form.buttons[category_start].icon == "textures/blocks/stone");
+    assert(form.buttons[category_start + 1].action == ui::ActionKind::DashboardCategory);
+    assert(form.buttons[category_start + 1].target == "ores");
+    assert(form.buttons[category_start + 1].icon == "textures/items/diamond");
+    assert(form.buttons[category_start + 2].action == ui::ActionKind::Noop);
 
-    assert(form.buttons[5].action == ui::ActionKind::DashboardCategory);
-    assert(form.buttons[5].target == "building");
-    assert(form.buttons[5].text.find("[当前]") != std::string::npos);
-    assert(form.buttons[5].icon == "textures/blocks/stone");
-    assert(form.buttons[6].action == ui::ActionKind::DashboardCategory);
-    assert(form.buttons[6].target == "ores");
-    assert(form.buttons[6].icon == "textures/items/diamond");
-
-    assert(form.buttons[8].action == ui::ActionKind::DashboardProduct);
-    assert(form.buttons[8].text.find("minecraft:stone") != std::string::npos);
-    assert(form.buttons[8].text.find("买 3 / 卖 5") != std::string::npos);
-    assert(form.buttons[8].icon == "textures/blocks/stone");
-    assert(form.buttons[9].action == ui::ActionKind::DashboardProduct);
-    assert(form.buttons[9].text.find("[选中]") != std::string::npos);
-    assert(form.buttons[9].text.find("minecraft:diamond") != std::string::npos);
-    assert(form.buttons[9].target == view.selected_product->product.product_key);
-    assert(form.buttons[9].icon == "textures/items/diamond");
+    const auto product_start = ui::dashboard_layout::kProductStart;
+    assert(form.buttons[product_start].action == ui::ActionKind::DashboardProduct);
+    assert(form.buttons[product_start].text.find("minecraft:stone") != std::string::npos);
+    assert(form.buttons[product_start].text.find("买 3 / 卖 5") != std::string::npos);
+    assert(form.buttons[product_start].icon == "textures/blocks/stone");
+    assert(form.buttons[product_start + 1].action == ui::ActionKind::DashboardProduct);
+    assert(form.buttons[product_start + 1].text.find("[选中]") != std::string::npos);
+    assert(form.buttons[product_start + 1].text.find("minecraft:diamond") != std::string::npos);
+    assert(form.buttons[product_start + 1].target == view.selected_product->product.product_key);
+    assert(form.buttons[product_start + 1].icon == "textures/items/diamond");
+    assert(form.buttons[product_start + 2].action == ui::ActionKind::Noop);
 }
 
 void test_ui_model_dashboard_pagination_and_tools() {
     ui::ExchangeUiModel model(6);
     const auto form = model.dashboard(sampleDashboardView());
 
-    assert(form.buttons[7].action == ui::ActionKind::DashboardPage);
-    assert(form.buttons[7].target == "0");
-    assert(form.buttons[10].action == ui::ActionKind::DashboardPage);
-    assert(form.buttons[10].target == "2");
-    assert(form.buttons[11].action == ui::ActionKind::OpenSearch);
-    assert(form.buttons[12].action == ui::ActionKind::OpenAllProducts);
-    assert(form.buttons[13].action == ui::ActionKind::OpenMyOrders);
-    assert(form.buttons[14].action == ui::ActionKind::OpenMailbox);
-    assert(form.buttons[15].action == ui::ActionKind::OpenAdmin);
+    const auto tool_start = ui::dashboard_layout::kToolStart;
+    assert(form.buttons[tool_start].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[tool_start].target == "0");
+    assert(form.buttons[tool_start + 1].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[tool_start + 1].target == "2");
+    assert(form.buttons[tool_start + 2].action == ui::ActionKind::OpenSearch);
+    assert(form.buttons[tool_start + 3].action == ui::ActionKind::OpenAllProducts);
+    assert(form.buttons[tool_start + 4].action == ui::ActionKind::OpenMyOrders);
+    assert(form.buttons[tool_start + 5].action == ui::ActionKind::OpenMailbox);
+    assert(form.buttons[tool_start + 6].action == ui::ActionKind::OpenAdmin);
+}
+
+void test_ui_model_dashboard_category_group_slot() {
+    ui::ExchangeUiModel model(6);
+    auto view = sampleDashboardView();
+    view.categories.clear();
+    for (std::size_t i = 0; i < ui::dashboard_layout::kCategorySlots - 1; ++i) {
+        view.categories.push_back({"cat" + std::to_string(i), "分类" + std::to_string(i), "textures/items/paper"});
+    }
+    view.category_page = 0;
+    view.total_category_pages = 2;
+
+    const auto form = model.dashboard(view);
+    const auto nav_index = ui::dashboard_layout::kCategoryStart + ui::dashboard_layout::kCategorySlots - 1;
+    assert(form.buttons[nav_index].action == ui::ActionKind::DashboardCategoryPage);
+    assert(form.buttons[nav_index].target == "1");
+    assert(form.buttons[nav_index].text.find("更多分类") != std::string::npos);
 }
 
 }  // namespace
@@ -324,6 +340,7 @@ int main() {
     test_ui_model_dashboard_sections_and_trade_actions();
     test_ui_model_dashboard_category_and_product_controls();
     test_ui_model_dashboard_pagination_and_tools();
+    test_ui_model_dashboard_category_group_slot();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }

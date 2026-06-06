@@ -1,0 +1,17 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Exchange Chest UI",
+    "description": "Chest-style visual layout for the Endstone Exchange ActionForm.",
+    "uuid": "3a5949a6-0af5-44a4-a07f-57e266f2f609",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 21, 0]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "ef56f8e8-f9dc-4fd0-b8bc-478831517786",
+      "version": [0, 1, 0]
+    }
+  ]
+}
