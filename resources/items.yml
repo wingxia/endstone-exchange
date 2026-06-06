@@ -3744,7 +3744,7 @@ categories:
         source: block
       minecraft:element_0:
         name: Unknown Element
-        icon: textures/blocks/
+        icon: textures/blocks/element_0
         source: block
       minecraft:element_92:
         name: Uranium

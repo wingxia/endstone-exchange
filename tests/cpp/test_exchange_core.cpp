@@ -17,7 +17,7 @@ namespace {
 
 Product productFor(const std::string& item_id, std::vector<Enchantment> enchants = {}) {
     const auto key = productKey(item_id, enchants);
-    return Product{key, normalizeIdentifier(item_id), enchants, item_id, "test", "icon", true};
+    return Product{key, normalizeIdentifier(item_id), enchants, item_id, "common", "textures/items/paper", true};
 }
 
 ItemSnapshot snapshotFor(const Product& product, std::int32_t quantity) {
@@ -154,6 +154,35 @@ void test_generated_catalog_is_searchable() {
     }));
 }
 
+void test_generated_catalog_has_complete_categories_and_icons() {
+    assert(exchange::catalog::products().size() >= 1866);
+    assert(!exchange::catalog::categories().empty());
+
+    std::unordered_map<std::string, bool> categories;
+    for (const auto& category : exchange::catalog::categories()) {
+        assert(!category.id.empty());
+        assert(!category.name.empty());
+        assert(!category.icon.empty());
+        categories.emplace(category.id, false);
+    }
+
+    for (const auto& product : exchange::catalog::products()) {
+        assert(!product.product_key.empty());
+        assert(!product.item_id.empty());
+        assert(product.item_id.rfind("minecraft:", 0) == 0);
+        assert(!product.display_name.empty());
+        assert(!product.category.empty());
+        assert(categories.count(product.category) == 1);
+        assert(!product.icon.empty());
+        assert(product.icon.rfind("textures/items/", 0) == 0 || product.icon.rfind("textures/blocks/", 0) == 0);
+        categories[product.category] = true;
+    }
+
+    for (const auto& [category, has_product] : categories) {
+        assert(has_product);
+    }
+}
+
 void test_mailbox_claim_marks_item() {
     InMemoryRepository repo;
     FakeEconomy economy;
@@ -179,10 +208,25 @@ void test_mailbox_claim_marks_item() {
 
 void test_ui_model_contains_expected_actions() {
     ui::ExchangeUiModel model(8);
-    const auto form = model.home({{"building", "基建", "textures/blocks/stone"}}, true);
-    assert(form.buttons.size() >= 6);
-    assert(form.buttons[0].action == ui::ActionKind::OpenSearch);
-    assert(form.buttons[1].action == ui::ActionKind::OpenAllProducts);
+    const std::vector<ui::CategorySpec> categories{
+        {"building", "建筑方块", "textures/blocks/stone"},
+        {"ores", "矿物材料", "textures/items/diamond"},
+    };
+    const auto form = model.home(categories, true);
+    assert(form.title.find("选择区") != std::string::npos);
+    assert(form.body.find("物品选择区") != std::string::npos);
+    assert(form.buttons.size() == categories.size() + 5);
+    assert(form.buttons[0].action == ui::ActionKind::OpenCategory);
+    assert(form.buttons[0].target == "building");
+    assert(form.buttons[0].icon == "textures/blocks/stone");
+    assert(form.buttons[1].action == ui::ActionKind::OpenCategory);
+    assert(form.buttons[1].target == "ores");
+    assert(form.buttons[1].icon == "textures/items/diamond");
+    assert(form.buttons[2].action == ui::ActionKind::OpenSearch);
+    assert(form.buttons[3].action == ui::ActionKind::OpenAllProducts);
+    assert(form.buttons[4].action == ui::ActionKind::OpenMyOrders);
+    assert(form.buttons[5].action == ui::ActionKind::OpenMailbox);
+    assert(form.buttons[6].action == ui::ActionKind::OpenAdmin);
 }
 
 void test_ui_model_search_results_page_targets() {
@@ -196,9 +240,37 @@ void test_ui_model_search_results_page_targets() {
     const auto iron = productFor("minecraft:iron_ingot");
     const auto form = model.searchResults("stone", {diamond, stone, bread, apple, coal, emerald, iron}, 0);
     assert(form.buttons.size() == 8);
+    assert(form.title.find("选择区") != std::string::npos);
+    assert(form.body.find("下单区") != std::string::npos);
     assert(form.buttons[0].action == ui::ActionKind::OpenProduct);
+    assert(form.buttons[0].text.find("minecraft:diamond") != std::string::npos);
+    assert(!form.buttons[0].icon.empty());
     assert(form.buttons[6].action == ui::ActionKind::NextPage);
     assert(form.buttons[6].target == "search|1");
+}
+
+void test_ui_model_product_page_order_ticket_actions() {
+    ui::ExchangeUiModel model(8);
+    const auto product = productFor("minecraft:diamond");
+    const Quote quote{product.product_key, 10, 12, 5, 7, 11};
+    const auto form = model.productPage(ui::ProductView{product, quote});
+
+    assert(form.title.find("下单区") != std::string::npos);
+    assert(form.body.find("右侧 | 行情与下单") != std::string::npos);
+    assert(form.body.find("最高买价: 10") != std::string::npos);
+    assert(form.body.find("最低卖价: 12") != std::string::npos);
+    assert(form.body.find("最近成交: 11") != std::string::npos);
+    assert(form.buttons.size() == 6);
+    assert(form.buttons[0].action == ui::ActionKind::MarketBuy);
+    assert(form.buttons[1].action == ui::ActionKind::LimitBuy);
+    assert(form.buttons[2].action == ui::ActionKind::MarketSell);
+    assert(form.buttons[3].action == ui::ActionKind::LimitSell);
+    assert(form.buttons[4].action == ui::ActionKind::OpenOrderBook);
+    assert(form.buttons[5].action == ui::ActionKind::Back);
+    for (std::size_t i = 0; i < 5; ++i) {
+        assert(form.buttons[i].target == product.product_key);
+        assert(!form.buttons[i].icon.empty());
+    }
 }
 
 }  // namespace
@@ -211,9 +283,11 @@ int main() {
     test_cancel_refunds_buy_order();
     test_admin_system_stock();
     test_generated_catalog_is_searchable();
+    test_generated_catalog_has_complete_categories_and_icons();
     test_mailbox_claim_marks_item();
     test_ui_model_contains_expected_actions();
     test_ui_model_search_results_page_targets();
+    test_ui_model_product_page_order_ticket_actions();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }

@@ -57,31 +57,34 @@ ExchangeUiModel::ExchangeUiModel(std::size_t page_size) : page_size_(std::max<st
 
 FormSpec ExchangeUiModel::home(const std::vector<CategorySpec>& categories, bool admin, std::optional<std::int64_t> balance) const {
     FormSpec form;
-    form.title = "UMoney Exchange";
+    form.title = "UMoney Exchange | 选择区";
     std::ostringstream body;
     body << "余额: " << money(balance)
-         << "\n选择左侧分类或搜索物品，再在商品面板提交买入、卖出或挂单。";
+         << "\n\n左侧 | 物品选择区"
+         << "\n先按分类浏览全物品图标，选中商品后进入右侧下单区。"
+         << "\n底部工具可搜索、查看订单或领取邮箱。";
     form.body = body.str();
-    form.buttons.push_back({"搜索物品", "textures/ui/magnifyingGlass", ActionKind::OpenSearch, ""});
-    form.buttons.push_back({"全部物品", "textures/items/book_normal", ActionKind::OpenAllProducts, ""});
-    form.buttons.push_back({"我的订单", "textures/items/paper", ActionKind::OpenMyOrders, ""});
-    form.buttons.push_back({"邮箱领取", "textures/items/minecart_chest", ActionKind::OpenMailbox, ""});
     for (const auto& category : categories) {
-        form.buttons.push_back({category.name, category.icon, ActionKind::OpenCategory, category.id});
+        form.buttons.push_back({"分类 | " + category.name, category.icon, ActionKind::OpenCategory, category.id});
     }
+    form.buttons.push_back({"工具 | 搜索物品", "textures/ui/magnifyingGlass", ActionKind::OpenSearch, ""});
+    form.buttons.push_back({"工具 | 全部物品", "textures/items/book_normal", ActionKind::OpenAllProducts, ""});
+    form.buttons.push_back({"账户 | 我的订单", "textures/items/paper", ActionKind::OpenMyOrders, ""});
+    form.buttons.push_back({"账户 | 邮箱领取", "textures/items/minecart_chest", ActionKind::OpenMailbox, ""});
     if (admin) {
-        form.buttons.push_back({"管理员", "textures/items/gold_ingot", ActionKind::OpenAdmin, ""});
+        form.buttons.push_back({"账户 | 管理员", "textures/items/gold_ingot", ActionKind::OpenAdmin, ""});
     }
     return form;
 }
 
 FormSpec ExchangeUiModel::categoryPage(const CategorySpec& category, const std::vector<Product>& products, std::size_t page) const {
-    return productListPage(category.name, "左侧选择物品，右侧商品页提交交易。", category.id, products, page, ActionKind::OpenCategory);
+    return productListPage(category.name + " | 选择区", "左侧 | 分类物品\n点击带图标商品进入右侧下单区。", category.id, products, page, ActionKind::OpenCategory);
 }
 
 FormSpec ExchangeUiModel::searchResults(const std::string& query, const std::vector<Product>& products, std::size_t page) const {
     const auto page_target = query == "全部物品" ? "all" : "search";
-    return productListPage("搜索: " + query, "搜索结果按分类和名称排序。", page_target, products, page, ActionKind::OpenSearch);
+    const auto title = query == "全部物品" ? "全部物品 | 选择区" : "搜索: " + query + " | 选择区";
+    return productListPage(title, "左侧 | 物品选择\n结果按分类和名称排序，点击商品进入右侧下单区。", page_target, products, page, ActionKind::OpenSearch);
 }
 
 FormSpec ExchangeUiModel::productListPage(std::string title, std::string body, std::string page_target, const std::vector<Product>& products, std::size_t page, ActionKind) const {
@@ -109,15 +112,20 @@ FormSpec ExchangeUiModel::productListPage(std::string title, std::string body, s
 
 FormSpec ExchangeUiModel::productPage(const ProductView& view) const {
     FormSpec form;
-    form.title = view.product.display_name;
+    form.title = view.product.display_name + " | 下单区";
     std::ostringstream body;
-    body << "物品ID: " << view.product.item_id
+    body << "右侧 | 行情与下单"
+         << "\n商品: " << view.product.display_name
+         << "\n物品ID: " << view.product.item_id
+         << "\n\n行情"
          << "\n最高买价: " << money(view.quote.best_bid)
          << "\n最低卖价: " << money(view.quote.best_ask)
          << "\n差价: " << spread(view.quote)
-         << "\n卖方库存: " << view.quote.ask_quantity
          << "\n买方需求: " << view.quote.bid_quantity
-         << "\n最近成交: " << money(view.quote.last_price);
+         << "\n卖方库存: " << view.quote.ask_quantity
+         << "\n最近成交: " << money(view.quote.last_price)
+         << "\n\n下单"
+         << "\n选择买入/卖出和市价/挂单快捷入口。";
     form.body = body.str();
     form.buttons.push_back({"买入 - 市价", "textures/items/emerald", ActionKind::MarketBuy, view.product.product_key});
     form.buttons.push_back({"买入 - 挂单", "textures/items/paper", ActionKind::LimitBuy, view.product.product_key});

@@ -6,6 +6,8 @@ from __future__ import annotations
 import html
 import json
 import re
+import subprocess
+import sys
 import textwrap
 import urllib.request
 from dataclasses import dataclass
@@ -15,6 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ITEMS_URL = "https://minecraft.wiki/w/Bedrock_Edition_data_values/Items2?action=raw"
 BLOCKS_URL = "https://minecraft.wiki/w/Bedrock_Edition_data_values/Blocks2?action=raw"
+MIN_CATALOG_ENTRIES = 1866
+VALID_ICON_PREFIXES = ("textures/items/", "textures/blocks/")
 
 CATEGORY_DEFS = [
     ("common", "常用", "textures/items/emerald"),
@@ -72,8 +76,31 @@ class Entry:
 
 def fetch(url: str) -> str:
     request = urllib.request.Request(url, headers={"User-Agent": "EndstoneExchangeCatalog/1.0"})
-    with urllib.request.urlopen(request, timeout=45) as response:
-        return response.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            return response.read().decode("utf-8")
+    except Exception as exc:
+        print(f"urllib fetch failed for {url}: {exc}; retrying with curl --http1.1", file=sys.stderr)
+
+    result = subprocess.run(
+        [
+            "curl",
+            "--http1.1",
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "60",
+            "-A",
+            "EndstoneExchangeCatalog/1.0",
+            url,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
 
 
 def split_template_args(payload: str) -> list[str]:
@@ -126,7 +153,7 @@ def parse_items(raw: str) -> list[tuple[str, str, str]]:
         if not item_id:
             continue
         name = first_template_name(parts) or item_id.replace("_", " ").title()
-        icon = texture_key(args.get("icon", item_id))
+        icon = texture_key(args.get("icon", item_id)) or texture_key(item_id)
         entries.append((f"minecraft:{item_id}", name, f"textures/items/{icon}"))
     return entries
 
@@ -142,7 +169,7 @@ def parse_blocks(raw: str) -> list[tuple[str, str, str]]:
         icon_name, resource_location, display = match.groups()
         item_id = f"minecraft:{resource_location.strip()}"
         name = clean_wiki_text(f"[[{display}]]")
-        icon = f"textures/blocks/{texture_key(icon_name)}"
+        icon = f"textures/blocks/{texture_key(icon_name) or texture_key(resource_location)}"
         entries.append((item_id, name, icon))
     return entries
 
@@ -197,6 +224,32 @@ def build_entries(items_raw: str, blocks_raw: str) -> list[Entry]:
             category = classify(item_id, name, source)
             merged[item_id] = Entry(item_id=item_id, name=name, category=category, icon=icon, source=source)
     return sorted(merged.values(), key=lambda e: (category_index(e.category), e.name.lower(), e.item_id))
+
+
+def validate_entries(entries: list[Entry]) -> None:
+    errors: list[str] = []
+    category_ids = {cat_id for cat_id, _name, _icon in CATEGORY_DEFS}
+    if len(entries) < MIN_CATALOG_ENTRIES:
+        errors.append(f"catalog has {len(entries)} entries, expected at least {MIN_CATALOG_ENTRIES}")
+    seen: set[str] = set()
+    for entry in entries:
+        if not entry.item_id.startswith("minecraft:"):
+            errors.append(f"{entry.item_id}: item_id must start with minecraft:")
+        if entry.item_id in seen:
+            errors.append(f"{entry.item_id}: duplicate item_id")
+        seen.add(entry.item_id)
+        if not entry.name.strip():
+            errors.append(f"{entry.item_id}: missing display name")
+        if entry.category not in category_ids:
+            errors.append(f"{entry.item_id}: unknown category {entry.category}")
+        if not entry.icon.strip():
+            errors.append(f"{entry.item_id}: missing icon")
+        elif not entry.icon.startswith(VALID_ICON_PREFIXES):
+            errors.append(f"{entry.item_id}: icon must use textures/items or textures/blocks: {entry.icon}")
+        elif entry.icon in VALID_ICON_PREFIXES:
+            errors.append(f"{entry.item_id}: icon path is incomplete")
+    if errors:
+        raise SystemExit("Catalog validation failed:\n" + "\n".join(f"- {error}" for error in errors[:25]))
 
 
 def category_index(category: str) -> int:
@@ -279,8 +332,7 @@ def main() -> int:
     items_raw = fetch(ITEMS_URL)
     blocks_raw = fetch(BLOCKS_URL)
     entries = build_entries(items_raw, blocks_raw)
-    if len(entries) < 700:
-        raise SystemExit(f"Refusing to write a suspiciously small catalog: {len(entries)} entries")
+    validate_entries(entries)
 
     (ROOT / "cpp/src/catalog").mkdir(parents=True, exist_ok=True)
     (ROOT / "cpp/src/catalog/GeneratedCatalog.cpp").write_text(emit_cpp(entries), encoding="utf-8")
