@@ -272,7 +272,7 @@ void test_ui_model_dashboard_category_and_product_controls() {
     const auto category_start = ui::dashboard_layout::kCategoryStart;
     assert(form.buttons[category_start].action == ui::ActionKind::DashboardCategory);
     assert(form.buttons[category_start].target == "building");
-    assert(form.buttons[category_start].text.find("[当前]") != std::string::npos);
+    assert(form.buttons[category_start].text.find("当前") != std::string::npos);
     assert(form.buttons[category_start].icon == "textures/blocks/stone");
     assert(form.buttons[category_start + 1].action == ui::ActionKind::DashboardCategory);
     assert(form.buttons[category_start + 1].target == "ores");
@@ -281,12 +281,13 @@ void test_ui_model_dashboard_category_and_product_controls() {
 
     const auto product_start = ui::dashboard_layout::kProductStart;
     assert(form.buttons[product_start].action == ui::ActionKind::DashboardProduct);
-    assert(form.buttons[product_start].text.find("minecraft:stone") != std::string::npos);
-    assert(form.buttons[product_start].text.find("买 3 / 卖 5") != std::string::npos);
+    assert(form.buttons[product_start].text.find('\n') == std::string::npos);
+    assert(form.buttons[product_start].text.find("minecraft:stone") == std::string::npos);
+    assert(form.buttons[product_start].text.find("买 3 / 卖 5") == std::string::npos);
     assert(form.buttons[product_start].icon == "textures/blocks/stone");
     assert(form.buttons[product_start + 1].action == ui::ActionKind::DashboardProduct);
-    assert(form.buttons[product_start + 1].text.find("[选中]") != std::string::npos);
-    assert(form.buttons[product_start + 1].text.find("minecraft:diamond") != std::string::npos);
+    assert(form.buttons[product_start + 1].text.find("选 ") != std::string::npos);
+    assert(form.buttons[product_start + 1].text.find("minecraft:diamond") == std::string::npos);
     assert(form.buttons[product_start + 1].target == view.selected_product->product.product_key);
     assert(form.buttons[product_start + 1].icon == "textures/items/diamond");
     assert(form.buttons[product_start + 2].action == ui::ActionKind::Noop);
@@ -298,14 +299,28 @@ void test_ui_model_dashboard_pagination_and_tools() {
 
     const auto tool_start = ui::dashboard_layout::kToolStart;
     assert(form.buttons[tool_start].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[tool_start].text == "上页");
     assert(form.buttons[tool_start].target == "0");
     assert(form.buttons[tool_start + 1].action == ui::ActionKind::DashboardPage);
+    assert(form.buttons[tool_start + 1].text == "下页");
     assert(form.buttons[tool_start + 1].target == "2");
     assert(form.buttons[tool_start + 2].action == ui::ActionKind::OpenSearch);
+    assert(form.buttons[tool_start + 2].text == "搜索");
     assert(form.buttons[tool_start + 3].action == ui::ActionKind::OpenAllProducts);
+    assert(form.buttons[tool_start + 3].text == "全部");
     assert(form.buttons[tool_start + 4].action == ui::ActionKind::OpenMyOrders);
+    assert(form.buttons[tool_start + 4].text == "订单");
     assert(form.buttons[tool_start + 5].action == ui::ActionKind::OpenMailbox);
+    assert(form.buttons[tool_start + 5].text == "邮箱");
     assert(form.buttons[tool_start + 6].action == ui::ActionKind::OpenAdmin);
+    assert(form.buttons[tool_start + 6].text == "管理");
+
+    const auto trade_start = ui::dashboard_layout::kTradeStart;
+    assert(form.buttons[trade_start].text == "买市");
+    assert(form.buttons[trade_start + 1].text == "买挂");
+    assert(form.buttons[trade_start + 2].text == "卖市");
+    assert(form.buttons[trade_start + 3].text == "卖挂");
+    assert(form.buttons[trade_start + 4].text == "簿");
 }
 
 void test_ui_model_dashboard_category_group_slot() {
@@ -322,7 +337,22 @@ void test_ui_model_dashboard_category_group_slot() {
     const auto nav_index = ui::dashboard_layout::kCategoryStart + ui::dashboard_layout::kCategorySlots - 1;
     assert(form.buttons[nav_index].action == ui::ActionKind::DashboardCategoryPage);
     assert(form.buttons[nav_index].target == "1");
-    assert(form.buttons[nav_index].text.find("更多分类") != std::string::npos);
+    assert(form.buttons[nav_index].text.find("更多") != std::string::npos);
+}
+
+void test_ui_model_subpages_use_fixed_frame() {
+    ui::ExchangeUiModel model(6);
+    auto diamond = productFor("minecraft:diamond");
+    diamond.icon = "textures/items/diamond";
+    const auto product_page = model.productPage(ui::ProductView{diamond, Quote{diamond.product_key, 1, 2, 3, 4, 5}});
+    assert(product_page.buttons.size() == ui::dashboard_layout::kTotalButtons);
+    assert(product_page.buttons[ui::dashboard_layout::kTradeStart].text == "买市");
+    assert(product_page.buttons[ui::dashboard_layout::kTradeStart + 4].text == "返");
+
+    const auto mailbox = model.mailboxPage({MailboxItem{1, "uuid", "name", diamond.product_key, 3, {}, "diamond", false}});
+    assert(mailbox.buttons.size() == ui::dashboard_layout::kTotalButtons);
+    assert(mailbox.buttons[ui::dashboard_layout::kProductStart].text == "全领");
+    assert(mailbox.buttons[ui::dashboard_layout::kTradeStart + 4].action == ui::ActionKind::Back);
 }
 
 }  // namespace
@@ -341,6 +371,7 @@ int main() {
     test_ui_model_dashboard_category_and_product_controls();
     test_ui_model_dashboard_pagination_and_tools();
     test_ui_model_dashboard_category_group_slot();
+    test_ui_model_subpages_use_fixed_frame();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }

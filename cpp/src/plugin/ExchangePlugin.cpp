@@ -646,53 +646,26 @@ void ExchangePlugin::openTradeConfirm(endstone::Player& player, ui::ActionKind a
         openDashboard(player);
         return;
     }
-    std::string action_name;
-    switch (action) {
-    case ui::ActionKind::MarketBuy:
-        action_name = "市价买入";
-        break;
-    case ui::ActionKind::LimitBuy:
-        action_name = "挂单买入";
-        break;
-    case ui::ActionKind::MarketSell:
-        action_name = "市价卖出";
-        break;
-    case ui::ActionKind::LimitSell:
-        action_name = "挂单卖出";
-        break;
-    default:
-        action_name = "交易";
-        break;
-    }
-
-    endstone::ActionForm form;
+    ui::FormSpec form;
     std::ostringstream body;
-    body << endstone::ColorFormat::Green << "商品: " << endstone::ColorFormat::White << product->display_name
-         << "\n" << endstone::ColorFormat::Green << "物品ID: " << endstone::ColorFormat::White << product->item_id
-         << "\n" << endstone::ColorFormat::Green << "数量: " << endstone::ColorFormat::White << quantity;
+    body << "确认交易"
+         << "\n商品: " << product->display_name
+         << "\n物品ID: " << product->item_id
+         << "\n数量: " << quantity;
     if (unit_price > 0) {
-        body << "\n" << endstone::ColorFormat::Green << "单价: " << endstone::ColorFormat::White << unit_price;
+        body << "\n单价: " << unit_price;
     }
-    form.setTitle(endstone::ColorFormat::Bold + endstone::ColorFormat::LightPurple + "确认表单")
-        .setContent(body.str());
-    form.addButton(endstone::ColorFormat::Yellow + "确认 " + action_name, "textures/ui/check",
-                   [this, payload = tradePayload(action, product_key, quantity, unit_price)](endstone::Player* clicked) {
-                       if (clicked != nullptr) {
-                           executeConfirmedTrade(*clicked, payload);
-                       }
-                   });
-    form.addButton(endstone::ColorFormat::Yellow + "返回", "textures/ui/refresh_light",
-                   [this, product_key](endstone::Player* clicked) {
-                       if (clicked != nullptr) {
-                           openDashboardProduct(*clicked, product_key);
-                       }
-                   });
-    player.sendForm(std::move(form));
+    form.title = "Exchange Chest UI";
+    form.body = body.str();
+    form.buttons.push_back({"确认", "textures/ui/check", ui::ActionKind::ConfirmTrade, tradePayload(action, product_key, quantity, unit_price)});
+    form.buttons.push_back({"返", "textures/ui/refresh_light", ui::ActionKind::Back, product_key});
+    sendForm(player, ui_.fixedFrame(std::move(form)));
 }
 
 void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec) {
+    const auto framed_spec = ui_.fixedFrame(spec);
     endstone::ActionForm form;
-    form.setTitle(spec.title).setContent(spec.body);
+    form.setTitle(framed_spec.title).setContent(framed_spec.body);
     const auto add_button = [this, &form](const ui::ButtonSpec& button) {
         form.addButton(button.text, button.icon.empty() ? std::nullopt : std::optional<std::string>{button.icon},
                        [this, button](endstone::Player* clicked) {
@@ -701,8 +674,8 @@ void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec
                            }
                        });
     };
-    if (!spec.controls.empty()) {
-        for (const auto& control : spec.controls) {
+    if (!framed_spec.controls.empty()) {
+        for (const auto& control : framed_spec.controls) {
             switch (control.kind) {
             case ui::ControlKind::Button:
                 add_button(control.button);
@@ -719,7 +692,7 @@ void ExchangePlugin::sendForm(endstone::Player& player, const ui::FormSpec& spec
             }
         }
     } else {
-        for (const auto& button : spec.buttons) {
+        for (const auto& button : framed_spec.buttons) {
             add_button(button);
         }
     }

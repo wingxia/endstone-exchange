@@ -118,6 +118,7 @@ class ExchangeUiModel {
 public:
     explicit ExchangeUiModel(std::size_t page_size = 18);
 
+    FormSpec fixedFrame(FormSpec form) const;
     FormSpec dashboard(const DashboardView& view) const;
     FormSpec home(const std::vector<CategorySpec>& categories, bool admin, std::optional<std::int64_t> balance = std::nullopt) const;
     FormSpec categoryPage(const CategorySpec& category, const std::vector<Product>& products, std::size_t page) const;

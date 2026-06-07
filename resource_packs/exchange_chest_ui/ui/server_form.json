@@ -4,7 +4,7 @@
     "$title_panel": "common_dialogs.standard_title_label",
     "$title_size": ["100% - 15px", 10],
     "$title_max_size": ["100% - 15px", 10],
-    "size": [445, 285],
+    "size": [520, 300],
     "$text_name": "#title_text",
     "$title_text_binding_type": "none",
     "$child_control": "server_form.exchange_form_panel",
@@ -16,37 +16,37 @@
     "controls": [
       {
         "category_slots@server_form.exchange_category_slots": {
-          "offset": [-180, 0]
+          "offset": [8, 8]
         }
       },
       {
         "product_slots@server_form.exchange_product_slots": {
-          "offset": [-52, 0]
+          "offset": [90, 8]
         }
       },
       {
         "quote_panel@server_form.exchange_quote_panel": {
-          "offset": [148, -72]
+          "offset": [356, 8]
         }
       },
       {
         "tool_slots@server_form.exchange_tool_slots": {
-          "offset": [148, 28]
+          "offset": [356, 135]
         }
       },
       {
         "trade_slots@server_form.exchange_trade_slots": {
-          "offset": [148, 106]
+          "offset": [356, 214]
         }
       }
     ]
   },
   "exchange_category_slots": {
     "type": "stack_panel",
-    "size": [76, "100% - 8px"],
+    "size": [74, 252],
     "orientation": "vertical",
-    "anchor_from": "center",
-    "anchor_to": "center",
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "collection_name": "form_buttons",
     "controls": [
       {"cat_0@server_form.exchange_side_button": {"collection_index": 0}},
@@ -62,9 +62,9 @@
   },
   "exchange_product_slots": {
     "type": "grid",
-    "size": [208, 252],
-    "anchor_from": "center",
-    "anchor_to": "center",
+    "size": [256, 252],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "grid_dimensions": [4, 7],
     "collection_name": "form_buttons",
     "controls": [
@@ -100,9 +100,9 @@
   },
   "exchange_quote_panel": {
     "type": "panel",
-    "size": [145, 104],
-    "anchor_from": "center",
-    "anchor_to": "center",
+    "size": [154, 120],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "controls": [
       {
         "quote_text": {
@@ -112,6 +112,8 @@
           "anchor_to": "top_left",
           "color": "$main_header_text_color",
           "font_size": "small",
+          "font_scale_factor": 0.78,
+          "line_padding": 0,
           "text": "#form_text",
           "bindings": [
             {
@@ -124,9 +126,9 @@
   },
   "exchange_tool_slots": {
     "type": "grid",
-    "size": [145, 72],
-    "anchor_from": "center",
-    "anchor_to": "center",
+    "size": [154, 70],
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "grid_dimensions": [2, 4],
     "collection_name": "form_buttons",
     "controls": [
@@ -141,10 +143,10 @@
   },
   "exchange_trade_slots": {
     "type": "stack_panel",
-    "size": [145, 78],
+    "size": [154, 76],
     "orientation": "vertical",
-    "anchor_from": "center",
-    "anchor_to": "center",
+    "anchor_from": "top_left",
+    "anchor_to": "top_left",
     "collection_name": "form_buttons",
     "controls": [
       {"trade_0@server_form.exchange_trade_button": {"collection_index": 44}},
@@ -154,88 +156,156 @@
       {"trade_4@server_form.exchange_trade_button": {"collection_index": 48}}
     ]
   },
-  "exchange_side_button": {
-    "type": "stack_panel",
-    "size": ["100%", 25],
-    "orientation": "horizontal",
-    "collection_name": "form_buttons",
-    "controls": [
+  "exchange_side_button@server_form.exchange_visible_slot": {
+    "size": ["100%", 27],
+    "$slot_controls": [
       {
-        "icon@server_form.exchange_button_icon": {
-          "size": [18, 18]
-        }
-      },
-      {
-        "button@server_form.exchange_text_button": {
-          "size": ["fill", 22],
-          "$button_text_max_size": ["100%", 18]
-        }
-      }
-    ]
-  },
-  "exchange_product_button": {
-    "type": "panel",
-    "size": [51, 36],
-    "collection_name": "form_buttons",
-    "controls": [
-      {
-        "button@server_form.exchange_text_button": {
-          "size": [48, 34],
-          "$button_text_max_size": ["100%", 26]
+        "hit@server_form.exchange_hit_button": {
+          "size": [72, 24],
+          "offset": [1, 1]
         }
       },
       {
         "icon@server_form.exchange_button_icon": {
-          "anchor_from": "top_left",
-          "anchor_to": "top_left",
-          "offset": [2, 2],
-          "size": [18, 18]
-        }
-      }
-    ]
-  },
-  "exchange_tool_button": {
-    "type": "stack_panel",
-    "size": [70, 18],
-    "orientation": "horizontal",
-    "collection_name": "form_buttons",
-    "controls": [
-      {
-        "icon@server_form.exchange_button_icon": {
-          "size": [14, 14]
+          "size": [18, 18],
+          "offset": [4, 4]
         }
       },
       {
-        "button@server_form.exchange_text_button": {
-          "size": ["fill", 18],
-          "$button_text_max_size": ["100%", 14]
+        "label@server_form.exchange_button_label": {
+          "size": [48, 19],
+          "offset": [23, 4],
+          "$label_scale": 0.72,
+          "$label_alignment": "left"
         }
       }
     ]
   },
-  "exchange_trade_button": {
-    "type": "stack_panel",
+  "exchange_product_button@server_form.exchange_visible_slot": {
+    "size": [64, 36],
+    "$slot_controls": [
+      {
+        "hit@server_form.exchange_hit_button": {
+          "size": [60, 33],
+          "offset": [2, 1]
+        }
+      },
+      {
+        "icon@server_form.exchange_button_icon": {
+          "size": [21, 21],
+          "offset": [21, 3]
+        }
+      },
+      {
+        "label@server_form.exchange_button_label": {
+          "size": [58, 10],
+          "offset": [3, 25],
+          "$label_scale": 0.55,
+          "$label_alignment": "center"
+        }
+      }
+    ]
+  },
+  "exchange_tool_button@server_form.exchange_visible_slot": {
+    "size": [77, 18],
+    "$slot_controls": [
+      {
+        "hit@server_form.exchange_hit_button": {
+          "size": [73, 17],
+          "offset": [2, 0]
+        }
+      },
+      {
+        "icon@server_form.exchange_button_icon": {
+          "size": [12, 12],
+          "offset": [5, 3]
+        }
+      },
+      {
+        "label@server_form.exchange_button_label": {
+          "size": [53, 13],
+          "offset": [19, 3],
+          "$label_scale": 0.62,
+          "$label_alignment": "left"
+        }
+      }
+    ]
+  },
+  "exchange_trade_button@server_form.exchange_visible_slot": {
     "size": ["100%", 15],
-    "orientation": "horizontal",
-    "collection_name": "form_buttons",
-    "controls": [
+    "$slot_controls": [
       {
-        "icon@server_form.exchange_button_icon": {
-          "size": [13, 13]
+        "hit@server_form.exchange_hit_button": {
+          "size": [150, 14],
+          "offset": [2, 0]
         }
       },
       {
-        "button@server_form.exchange_text_button": {
-          "size": ["fill", 15],
-          "$button_text_max_size": ["100%", 12]
+        "icon@server_form.exchange_button_icon": {
+          "size": [11, 11],
+          "offset": [6, 2]
         }
+      },
+      {
+        "label@server_form.exchange_button_label": {
+          "size": [126, 12],
+          "offset": [20, 2],
+          "$label_scale": 0.62,
+          "$label_alignment": "left"
+        }
+      }
+    ]
+  },
+  "exchange_visible_slot": {
+    "type": "panel",
+    "collection_name": "form_buttons",
+    "$slot_controls": [],
+    "controls": "$slot_controls",
+    "bindings": [
+      {
+        "binding_type": "collection_details",
+        "binding_collection_name": "form_buttons"
+      },
+      {
+        "binding_name": "#form_button_text",
+        "binding_type": "collection",
+        "binding_collection_name": "form_buttons",
+        "binding_name_override": "#slot_text"
+      },
+      {
+        "binding_name": "#form_button_texture",
+        "binding_type": "collection",
+        "binding_collection_name": "form_buttons",
+        "binding_name_override": "#slot_texture"
+      },
+      {
+        "binding_type": "view",
+        "source_property_name": "(not ((#slot_text = '') and (#slot_texture = '')))",
+        "target_property_name": "#visible"
+      }
+    ]
+  },
+  "exchange_hit_button@common_buttons.light_text_button": {
+    "$pressed_button_name": "button.form_button_click",
+    "$button_text": "",
+    "$button_text_binding_type": "none",
+    "$button_binding_condition": "once",
+    "layer": 1,
+    "bindings": [
+      {
+        "binding_type": "collection_details",
+        "binding_collection_name": "form_buttons"
       }
     ]
   },
   "exchange_button_icon": {
     "type": "image",
-    "layer": 2,
+    "layer": 5,
     "bindings": [
+      {
+        "binding_type": "collection_details",
+        "binding_collection_name": "form_buttons"
+      },
       {
         "binding_name": "#form_button_texture",
         "binding_name_override": "#texture",
@@ -255,16 +325,30 @@
       }
     ]
   },
-  "exchange_text_button@common_buttons.light_text_button": {
-    "$pressed_button_name": "button.form_button_click",
-    "$button_text": "#form_button_text",
-    "$button_text_binding_type": "collection",
-    "$button_text_grid_collection_name": "form_buttons",
-    "$button_binding_condition": "once",
+  "exchange_button_label": {
+    "type": "label",
+    "layer": 6,
+    "color": "$main_header_text_color",
+    "font_size": "small",
+    "font_scale_factor": "$label_scale",
+    "text_alignment": "$label_alignment",
+    "text": "#form_button_text",
+    "$label_scale|default": 0.65,
+    "$label_alignment|default": "center",
     "bindings": [
       {
         "binding_type": "collection_details",
         "binding_collection_name": "form_buttons"
+      },
+      {
+        "binding_name": "#form_button_text",
+        "binding_type": "collection",
+        "binding_collection_name": "form_buttons"
+      },
+      {
+        "binding_type": "view",
+        "source_property_name": "(not (#form_button_text = ''))",
+        "target_property_name": "#visible"
       }
     ]
   }
