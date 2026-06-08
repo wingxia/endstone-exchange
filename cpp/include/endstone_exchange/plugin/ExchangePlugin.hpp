@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -14,12 +13,6 @@
 #include "endstone_exchange/core/Repository.hpp"
 #include "endstone_exchange/ui/ExchangeUiModel.hpp"
 
-namespace endstone {
-class PacketReceiveEvent;
-class PacketSendEvent;
-class PlayerQuitEvent;
-}  // namespace endstone
-
 namespace exchange::plugin {
 
 struct DashboardState {
@@ -28,51 +21,6 @@ struct DashboardState {
     std::size_t page{0};
     std::string product_key;
     std::string search_query;
-};
-
-enum class ChestSessionState {
-    None,
-    GraphicSent,
-    GraphicDataSent,
-    Opening,
-    Open,
-    Closing
-};
-
-enum class ChestActionKind {
-    None,
-    Category,
-    CategoryPage,
-    Product,
-    Page,
-    Search,
-    AllProducts,
-    MyOrders,
-    Mailbox,
-    Admin,
-    MarketBuy,
-    LimitBuy,
-    MarketSell,
-    LimitSell,
-    OrderBook,
-    Close
-};
-
-struct ChestSlotAction {
-    ChestActionKind kind{ChestActionKind::None};
-    std::string target;
-    std::size_t page{0};
-};
-
-struct ChestSession {
-    ChestSessionState state{ChestSessionState::None};
-    DashboardState dashboard;
-    int block_x{0};
-    int block_y{0};
-    int block_z{0};
-    int second_block_x{0};
-    std::int64_t ack_timestamp{0};
-    std::unordered_map<int, ChestSlotAction> actions;
 };
 
 class ExchangePlugin : public endstone::Plugin {
@@ -84,18 +32,6 @@ public:
 private:
     void seedCatalog();
     void openHome(endstone::Player& player);
-    void openChestDashboard(endstone::Player& player);
-    void openChestProduct(endstone::Player& player, const std::string& product_key);
-    void refreshChest(endstone::Player& player);
-    void closeChest(endstone::Player& player, bool remove_blocks = true);
-    void sendChestGraphic(endstone::Player& player, ChestSession& session);
-    void sendChestGraphicData(endstone::Player& player, ChestSession& session);
-    void sendChestOpen(endstone::Player& player, ChestSession& session);
-    void sendChestContents(endstone::Player& player, ChestSession& session);
-    void handleChestSlot(endstone::Player& player, int slot);
-    void handlePacketReceive(endstone::PacketReceiveEvent& event);
-    void handlePacketSend(endstone::PacketSendEvent& event);
-    void handlePlayerQuit(endstone::PlayerQuitEvent& event);
     void openDashboard(endstone::Player& player);
     void openDashboardCategory(endstone::Player& player, const std::string& category_id);
     void openDashboardCategoryPage(endstone::Player& player, std::size_t page);
@@ -132,8 +68,6 @@ private:
     ui::ExchangeUiModel ui_{18};
     std::unordered_map<std::string, std::string> search_queries_;
     std::unordered_map<std::string, DashboardState> dashboard_states_;
-    std::unordered_map<std::string, ChestSession> chest_sessions_;
-    std::unordered_map<std::string, std::int16_t> item_runtime_ids_;
 };
 
 }  // namespace exchange::plugin
