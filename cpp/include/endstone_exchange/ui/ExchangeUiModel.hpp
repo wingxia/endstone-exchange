@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -113,6 +114,50 @@ inline constexpr std::size_t kTradeStart = kToolStart + kToolSlots;
 inline constexpr std::size_t kTotalButtons = kTradeStart + kTradeSlots;
 
 }  // namespace dashboard_layout
+
+namespace chest_layout {
+
+inline constexpr std::size_t kRows = 6;
+inline constexpr std::size_t kColumns = 9;
+inline constexpr std::size_t kTotalSlots = kRows * kColumns;
+inline constexpr std::size_t kCategorySlots = kRows;
+inline constexpr std::size_t kProductSlots = 30;
+
+inline constexpr std::size_t slot(std::size_t row, std::size_t column) {
+    return row * kColumns + column;
+}
+
+inline constexpr std::array<std::size_t, kCategorySlots> kCategoryColumn{
+    slot(0, 0), slot(1, 0), slot(2, 0), slot(3, 0), slot(4, 0), slot(5, 0),
+};
+
+inline constexpr std::array<std::size_t, kProductSlots> kProductGrid{
+    slot(0, 1), slot(0, 2), slot(0, 3), slot(0, 4), slot(0, 5),
+    slot(1, 1), slot(1, 2), slot(1, 3), slot(1, 4), slot(1, 5),
+    slot(2, 1), slot(2, 2), slot(2, 3), slot(2, 4), slot(2, 5),
+    slot(3, 1), slot(3, 2), slot(3, 3), slot(3, 4), slot(3, 5),
+    slot(4, 1), slot(4, 2), slot(4, 3), slot(4, 4), slot(4, 5),
+    slot(5, 1), slot(5, 2), slot(5, 3), slot(5, 4), slot(5, 5),
+};
+
+inline constexpr std::array<std::size_t, kRows> kToolColumn{
+    slot(0, 6), slot(1, 6), slot(2, 6), slot(3, 6), slot(4, 6), slot(5, 6),
+};
+
+inline constexpr std::size_t kInfoSlot = slot(0, 7);
+inline constexpr std::size_t kBookSlot = slot(0, 8);
+inline constexpr std::size_t kBuyMarketSlot = slot(1, 7);
+inline constexpr std::size_t kBuyLimitSlot = slot(1, 8);
+inline constexpr std::size_t kSellMarketSlot = slot(2, 7);
+inline constexpr std::size_t kSellLimitSlot = slot(2, 8);
+inline constexpr std::size_t kBidSlot = slot(3, 7);
+inline constexpr std::size_t kAskSlot = slot(3, 8);
+inline constexpr std::size_t kDepthSlot = slot(4, 7);
+inline constexpr std::size_t kLastSlot = slot(4, 8);
+inline constexpr std::size_t kCloseSlot = slot(5, 7);
+inline constexpr std::size_t kAdminSlot = slot(5, 8);
+
+}  // namespace chest_layout
 
 class ExchangeUiModel {
 public:

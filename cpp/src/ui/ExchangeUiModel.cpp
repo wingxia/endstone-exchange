@@ -310,7 +310,7 @@ FormSpec ExchangeUiModel::home(const std::vector<CategorySpec>& categories, bool
     if (admin) {
         form.buttons.push_back({"账户 | 管理员", "textures/items/gold_ingot", ActionKind::OpenAdmin, ""});
     }
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::categoryPage(const CategorySpec& category, const std::vector<Product>& products, std::size_t page) const {
@@ -343,7 +343,7 @@ FormSpec ExchangeUiModel::productListPage(std::string title, std::string body, s
         form.buttons.push_back({"下页", "textures/ui/arrow_right", ActionKind::NextPage, pageTarget(page_target, page + 1)});
     }
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, ""});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::productPage(const ProductView& view) const {
@@ -369,7 +369,7 @@ FormSpec ExchangeUiModel::productPage(const ProductView& view) const {
     form.buttons.push_back({"卖挂", "textures/items/writable_book", ActionKind::LimitSell, view.product.product_key});
     form.buttons.push_back({"簿", "textures/items/book_normal", ActionKind::OpenOrderBook, view.product.product_key});
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, ""});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::orderBookPage(const Product& product, const OrderBook& book) const {
@@ -392,7 +392,7 @@ FormSpec ExchangeUiModel::orderBookPage(const Product& product, const OrderBook&
         form.buttons.push_back({"卖#" + std::to_string(bid.id), "textures/items/chest", ActionKind::MarketSell, std::to_string(bid.id)});
     }
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, product.product_key});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::myOrdersPage(const std::vector<Order>& orders) const {
@@ -414,7 +414,7 @@ FormSpec ExchangeUiModel::myOrdersPage(const std::vector<Order>& orders) const {
         }
     }
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, ""});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::mailboxPage(const std::vector<MailboxItem>& items) const {
@@ -430,7 +430,7 @@ FormSpec ExchangeUiModel::mailboxPage(const std::vector<MailboxItem>& items) con
         form.buttons.push_back({compactText(label.str(), 18), "textures/items/chest", ActionKind::ClaimMailboxItem, std::to_string(item.id)});
     }
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, ""});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 FormSpec ExchangeUiModel::adminHome(const std::vector<Product>& stock_templates) const {
@@ -441,7 +441,7 @@ FormSpec ExchangeUiModel::adminHome(const std::vector<Product>& stock_templates)
         form.buttons.push_back({"补 " + compactText(product.display_name, 14), product.icon, ActionKind::AdminRestock, product.product_key});
     }
     form.buttons.push_back({"返", "textures/ui/undoArrow", ActionKind::Back, ""});
-    return fixedFrame(std::move(form));
+    return form;
 }
 
 }  // namespace exchange::ui

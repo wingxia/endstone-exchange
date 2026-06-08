@@ -1,5 +1,6 @@
 #include <cassert>
 #include <algorithm>
+#include <array>
 #include <iostream>
 #include <stdexcept>
 #include <unordered_map>
@@ -340,19 +341,66 @@ void test_ui_model_dashboard_category_group_slot() {
     assert(form.buttons[nav_index].text.find("更多") != std::string::npos);
 }
 
-void test_ui_model_subpages_use_fixed_frame() {
+void test_chest_layout_slots_are_fixed() {
+    using namespace exchange::ui::chest_layout;
+
+    assert(kTotalSlots == 54);
+    assert(kCategorySlots == 6);
+    assert(kProductSlots == 30);
+    assert(kCategoryColumn.front() == 0);
+    assert(kCategoryColumn.back() == 45);
+    assert(kProductGrid.front() == 1);
+    assert(kProductGrid.back() == 50);
+    assert(kToolColumn.front() == 6);
+    assert(kToolColumn.back() == 51);
+    assert(kInfoSlot == 7);
+    assert(kBookSlot == 8);
+    assert(kBuyMarketSlot == 16);
+    assert(kBuyLimitSlot == 17);
+    assert(kSellMarketSlot == 25);
+    assert(kSellLimitSlot == 26);
+    assert(kCloseSlot == 52);
+    assert(kAdminSlot == 53);
+
+    std::array<bool, kTotalSlots> occupied{};
+    for (const auto slot : kCategoryColumn) {
+        assert(slot < kTotalSlots);
+        assert(!occupied[slot]);
+        occupied[slot] = true;
+    }
+    for (const auto slot : kProductGrid) {
+        assert(slot < kTotalSlots);
+        assert(!occupied[slot]);
+        occupied[slot] = true;
+    }
+    for (const auto slot : kToolColumn) {
+        assert(slot < kTotalSlots);
+        assert(!occupied[slot]);
+        occupied[slot] = true;
+    }
+    for (const auto slot : {kInfoSlot, kBookSlot, kBuyMarketSlot, kBuyLimitSlot, kSellMarketSlot, kSellLimitSlot,
+                            kBidSlot, kAskSlot, kDepthSlot, kLastSlot, kCloseSlot, kAdminSlot}) {
+        assert(slot < kTotalSlots);
+        assert(!occupied[slot]);
+        occupied[slot] = true;
+    }
+    assert(std::all_of(occupied.begin(), occupied.end(), [](bool value) { return value; }));
+}
+
+void test_ui_model_subpages_are_native_forms() {
     ui::ExchangeUiModel model(6);
     auto diamond = productFor("minecraft:diamond");
     diamond.icon = "textures/items/diamond";
     const auto product_page = model.productPage(ui::ProductView{diamond, Quote{diamond.product_key, 1, 2, 3, 4, 5}});
-    assert(product_page.buttons.size() == ui::dashboard_layout::kTotalButtons);
-    assert(product_page.buttons[ui::dashboard_layout::kTradeStart].text == "买市");
-    assert(product_page.buttons[ui::dashboard_layout::kTradeStart + 4].text == "返");
+    assert(product_page.buttons.size() == 6);
+    assert(product_page.buttons[0].text == "买市");
+    assert(product_page.buttons[4].text == "簿");
+    assert(product_page.buttons[5].text == "返");
 
     const auto mailbox = model.mailboxPage({MailboxItem{1, "uuid", "name", diamond.product_key, 3, {}, "diamond", false}});
-    assert(mailbox.buttons.size() == ui::dashboard_layout::kTotalButtons);
-    assert(mailbox.buttons[ui::dashboard_layout::kProductStart].text == "全领");
-    assert(mailbox.buttons[ui::dashboard_layout::kTradeStart + 4].action == ui::ActionKind::Back);
+    assert(mailbox.buttons.size() == 3);
+    assert(mailbox.buttons[0].text == "全领");
+    assert(mailbox.buttons[2].action == ui::ActionKind::Back);
 }
 
 }  // namespace
@@ -371,7 +419,8 @@ int main() {
     test_ui_model_dashboard_category_and_product_controls();
     test_ui_model_dashboard_pagination_and_tools();
     test_ui_model_dashboard_category_group_slot();
-    test_ui_model_subpages_use_fixed_frame();
+    test_chest_layout_slots_are_fixed();
+    test_ui_model_subpages_are_native_forms();
     std::cout << "exchange_core_tests passed\n";
     return 0;
 }
