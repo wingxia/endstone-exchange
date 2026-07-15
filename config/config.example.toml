@@ -1,0 +1,22 @@
+# Copy this file to plugins/exchange/config.toml.
+# Never commit a real database password.
+
+[database]
+host = "127.0.0.1"
+port = 3306
+user = "exchange"
+password = ""
+name = "endstone_exchange"
+connect_timeout_seconds = 5
+
+[market]
+admin_only = true
+initial_balance = 10000.00
+max_order_quantity = 2304
+price_min = 0.01
+price_max = 1000000.00
+price_step = 0.01
+order_book_depth = 5
+hologram_refresh_ticks = 20
+frame_capture_delay_ticks = 80
+cleanup_structure_captures = true

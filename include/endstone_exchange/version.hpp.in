@@ -1,0 +1,3 @@
+#pragma once
+
+#define ENDSTONE_EXCHANGE_VERSION "@PROJECT_VERSION@"
