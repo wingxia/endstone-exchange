@@ -33,10 +33,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Endstone LLVM toolchain
+        uses: EndstoneMC/endstone/.github/actions/setup-clang@v0.11.6
+        with:
+          llvm-version: "20"
+
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang cmake ninja-build pkg-config libc++-dev libc++abi-dev libmariadb-dev
+          sudo apt-get install --yes cmake ninja-build pkg-config libmariadb-dev
 
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DEXCHANGE_BUILD_TESTS=ON

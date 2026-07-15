@@ -22,11 +22,14 @@
 
 ## 构建
 
-Linux 上必须使用 Clang 与 libc++，以匹配 Endstone ABI。以 Debian/Ubuntu 为例：
+Linux 上必须使用 Endstone v0.11.6 同款的 LLVM/Clang 20 与 libc++，以匹配 ABI，并避开旧版 libc++ 的 `std::format` 不兼容。以 Debian/Ubuntu 为例：
 
 ```bash
-sudo apt-get install clang cmake ninja-build pkg-config libc++-dev libc++abi-dev libmariadb-dev
-cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DEXCHANGE_BUILD_TESTS=ON
+wget https://apt.llvm.org/llvm.sh -O /tmp/llvm.sh
+chmod +x /tmp/llvm.sh
+sudo /tmp/llvm.sh 20
+sudo apt-get install cmake ninja-build pkg-config libc++-20-dev libc++abi-20-dev libmariadb-dev
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-20 -DEXCHANGE_BUILD_TESTS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
