@@ -1095,11 +1095,26 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
     auto hologram_location = *location;
     hologram_location.setY(hologram_location.getY() + 0.25F);
     endstone::Actor *hologram = nullptr;
-    if (const auto it = hologram_ids_.find(market.id); it != hologram_ids_.end()) {
-        hologram = findActorById(it->second);
+    const auto tag = hologramTag(market.id);
+    const auto remembered = hologram_ids_.find(market.id);
+    std::vector<endstone::Actor *> matches;
+    if (const auto *level = getServer().getLevel(); level != nullptr) {
+        for (auto *actor : level->getActors()) {
+            if (actor != nullptr && actor->isValid() && hasTag(*actor, tag)) {
+                matches.push_back(actor);
+                if (remembered != hologram_ids_.end() && actor->getId() == remembered->second) {
+                    hologram = actor;
+                }
+            }
+        }
     }
-    if (hologram == nullptr) {
-        hologram = findActorByTag(hologramTag(market.id));
+    if (hologram == nullptr && !matches.empty()) {
+        hologram = matches.front();
+    }
+    for (auto *duplicate : matches) {
+        if (duplicate != hologram) {
+            duplicate->remove();
+        }
     }
     if (hologram == nullptr) {
         hologram = hologram_location.getDimension().spawnActor(hologram_location, "minecraft:armor_stand");
@@ -1108,8 +1123,8 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
             // Leave the market active and let the periodic refresh retry later.
             return;
         }
-        static_cast<void>(hologram->addScoreboardTag(hologramTag(market.id)));
-        const auto command = std::format("effect @e[tag={},c=1] invisibility infinite 0 true", hologramTag(market.id));
+        static_cast<void>(hologram->addScoreboardTag(tag));
+        const auto command = std::format("effect @e[tag={},c=1] invisibility infinite 0 true", tag);
         static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(), command));
     }
     hologram_ids_[market.id] = hologram->getId();
@@ -1120,16 +1135,21 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
 }
 
 void ExchangePlugin::removeHologram(const Id market_id) {
-    endstone::Actor *actor = nullptr;
+    const auto tag = hologramTag(market_id);
+    std::optional<std::int64_t> remembered;
     if (const auto it = hologram_ids_.find(market_id); it != hologram_ids_.end()) {
-        actor = findActorById(it->second);
-    }
-    if (actor == nullptr) {
-        actor = findActorByTag(hologramTag(market_id));
+        remembered = it->second;
     }
     hologram_ids_.erase(market_id);
-    if (actor != nullptr && actor->isValid()) {
-        actor->remove();
+    const auto *level = getServer().getLevel();
+    if (level == nullptr) {
+        return;
+    }
+    for (auto *actor : level->getActors()) {
+        if (actor != nullptr && actor->isValid() &&
+            (hasTag(*actor, tag) || (remembered && actor->getId() == *remembered))) {
+            actor->remove();
+        }
     }
 }
 
