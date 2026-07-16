@@ -17,6 +17,7 @@
 #include <mutex>
 #include <numeric>
 #include <string_view>
+#include <thread>
 
 namespace exchange {
 
@@ -26,6 +27,7 @@ struct HologramSnapshotState {
     std::optional<std::string> error;
     std::atomic_bool query_running{false};
     std::atomic_bool stopping{false};
+    std::jthread query_thread;
 };
 
 namespace {
@@ -131,6 +133,10 @@ void ExchangePlugin::onDisable() {
     ready_ = false;
     if (hologram_snapshot_state_) {
         hologram_snapshot_state_->stopping = true;
+        if (hologram_snapshot_state_->query_thread.joinable()) {
+            hologram_snapshot_state_->query_thread.request_stop();
+            hologram_snapshot_state_->query_thread.join();
+        }
     }
     if (refresh_task_) {
         refresh_task_->cancel();
@@ -1031,34 +1037,41 @@ void ExchangePlugin::refreshHolograms() {
         const auto database_config = config_.database;
         const auto initial_balance = config_.market.initial_balance_cents;
         const auto max_order_quantity = config_.market.max_order_quantity;
-        std::shared_ptr<endstone::Task> task;
+        if (state->query_thread.joinable()) {
+            state->query_thread.join();
+        }
+        auto *state_ptr = state.get();
         try {
-            task = getServer().getScheduler().runTaskAsync(
-                *this, [state, ids = std::move(ids), database_config, initial_balance, max_order_quantity] {
+            // Endstone 0.11.6's async scheduler captures its queued task by reference before
+            // dispatching it to the worker pool, which can dereference a dead queue element.
+            // Own one standard C++ worker instead and join it explicitly during shutdown.
+            state->query_thread = std::jthread(
+                [state_ptr, ids = std::move(ids), database_config, initial_balance, max_order_quantity] {
                     try {
                         Database database(database_config);
                         database.connect();
                         ExchangeService service(database, initial_balance, max_order_quantity);
                         auto books = service.topOfBooks(ids);
-                        if (!state->stopping) {
-                            std::scoped_lock lock(state->mutex);
-                            state->ready_snapshot = std::move(books);
+                        if (!state_ptr->stopping) {
+                            std::scoped_lock lock(state_ptr->mutex);
+                            state_ptr->ready_snapshot = std::move(books);
                         }
                     } catch (const std::exception &exception) {
-                        if (!state->stopping) {
-                            std::scoped_lock lock(state->mutex);
-                            state->error = exception.what();
+                        if (!state_ptr->stopping) {
+                            std::scoped_lock lock(state_ptr->mutex);
+                            state_ptr->error = exception.what();
+                        }
+                    } catch (...) {
+                        if (!state_ptr->stopping) {
+                            std::scoped_lock lock(state_ptr->mutex);
+                            state_ptr->error = "unknown asynchronous snapshot failure";
                         }
                     }
-                    state->query_running = false;
+                    state_ptr->query_running = false;
                 });
         } catch (...) {
             state->query_running = false;
             throw;
-        }
-        if (!task) {
-            state->query_running = false;
-            throw std::runtime_error("could not schedule asynchronous hologram snapshot");
         }
     } catch (const std::exception &error) {
         getLogger().warning("Hologram refresh failed: {}", error.what());

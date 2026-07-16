@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.1.1 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(endstone)
 
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb)
 
 configure_file(include/endstone_exchange/version.hpp.in
@@ -50,7 +51,7 @@ target_include_directories(exchange PRIVATE
     include
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
-target_link_libraries(exchange PRIVATE PkgConfig::MARIADB)
+target_link_libraries(exchange PRIVATE PkgConfig::MARIADB Threads::Threads)
 target_compile_options(exchange PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(exchange PROPERTIES SKIP_BUILD_RPATH TRUE)
 
