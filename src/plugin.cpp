@@ -104,8 +104,11 @@ void ExchangePlugin::onEnable() {
                                                      config_.market.max_order_quantity);
         hologram_snapshot_state_ = std::make_shared<HologramSnapshotState>();
 
-        registerEvent(&ExchangePlugin::onPlayerInteract, *this, endstone::EventPriority::High, true);
-        registerEvent(&ExchangePlugin::onPlayerInteractActor, *this, endstone::EventPriority::High, true);
+        // Bedrock marks interactions with an item that has no vanilla action as cancelled before
+        // plugins see them. The exchanger is intentionally such an item, so these handlers must
+        // still receive cancelled events and decide whether to consume them themselves.
+        registerEvent(&ExchangePlugin::onPlayerInteract, *this, endstone::EventPriority::High, false);
+        registerEvent(&ExchangePlugin::onPlayerInteractActor, *this, endstone::EventPriority::High, false);
         registerEvent(&ExchangePlugin::onBlockBreak, *this, endstone::EventPriority::Monitor, true);
         registerEvent(&ExchangePlugin::onActorDamage, *this, endstone::EventPriority::Highest, true);
         registerEvent(&ExchangePlugin::onActorRemove, *this, endstone::EventPriority::Monitor);
@@ -689,7 +692,8 @@ void ExchangePlugin::restoreMarkets() {
     target_index_.clear();
     hologram_ids_.clear();
     hologram_books_.clear();
-    hologram_snapshot_state_.reset();
+    // Keep the snapshot state created by onEnable(). Resetting it here disables both the
+    // initial asynchronous order-book query and every periodic hologram refresh afterwards.
     if (const auto *level = getServer().getLevel(); level != nullptr) {
         for (auto *actor : level->getActors()) {
             if (actor == nullptr) {
