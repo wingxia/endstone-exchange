@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.0.0 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,10 +36,12 @@ set(EXCHANGE_CORE_SOURCES
     src/config.cpp
     src/database.cpp
     src/exchange_service.cpp
+    src/price_window.cpp
 )
 
 endstone_add_plugin(exchange
     src/plugin.cpp
+    src/inventory_escrow.cpp
     src/nbt_codec.cpp
     src/structure_reader.cpp
     ${EXCHANGE_CORE_SOURCES}

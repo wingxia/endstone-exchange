@@ -13,6 +13,8 @@ using Id = std::uint64_t;
 enum class TargetKind { Block, Actor };
 enum class Side { Buy, Sell };
 enum class OrderType { Limit, Market };
+enum class DeliveryClaimStatus { Prepared, Applied };
+enum class SellEscrowStatus { Prepared, Tagged, Ordered };
 
 struct ItemPrototype {
     std::string type;
@@ -80,22 +82,46 @@ struct Delivery {
     ItemPrototype item;
     int quantity{0};
     int claimed_quantity{0};
+    int reserved_quantity{0};
     std::string reason;
 };
 
-[[nodiscard]] inline const char *toSql(TargetKind kind)
-{
+struct DeliveryClaim {
+    Id id{0};
+    Id delivery_id{0};
+    ItemPrototype item;
+    int quantity{0};
+    int applied_quantity{0};
+    DeliveryClaimStatus status{DeliveryClaimStatus::Prepared};
+    bool cleaned{false};
+};
+
+struct SellEscrow {
+    Id id{0};
+    Id market_id{0};
+    ItemPrototype item;
+    std::string player_uuid;
+    std::string player_name;
+    OrderType order_type{OrderType::Limit};
+    Cents price_cents{0};
+    int requested_quantity{0};
+    int tagged_quantity{0};
+    int receipt_count{0};
+    SellEscrowStatus status{SellEscrowStatus::Prepared};
+    std::optional<Id> order_id;
+    bool cleaned{false};
+};
+
+[[nodiscard]] inline const char *toSql(TargetKind kind) {
     return kind == TargetKind::Block ? "BLOCK" : "ACTOR";
 }
 
-[[nodiscard]] inline const char *toSql(Side side)
-{
+[[nodiscard]] inline const char *toSql(Side side) {
     return side == Side::Buy ? "BUY" : "SELL";
 }
 
-[[nodiscard]] inline const char *toSql(OrderType type)
-{
+[[nodiscard]] inline const char *toSql(OrderType type) {
     return type == OrderType::Limit ? "LIMIT" : "MARKET";
 }
 
-}  // namespace exchange
+} // namespace exchange

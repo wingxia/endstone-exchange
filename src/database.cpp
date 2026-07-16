@@ -13,8 +13,7 @@ namespace exchange {
 struct Database::Impl {
     MYSQL *connection{nullptr};
 
-    ~Impl()
-    {
+    ~Impl() {
         if (connection != nullptr) {
             mysql_close(connection);
         }
@@ -27,8 +26,7 @@ Database::~Database() = default;
 Database::Database(Database &&) noexcept = default;
 Database &Database::operator=(Database &&) noexcept = default;
 
-void Database::connect()
-{
+void Database::connect() {
     if (impl_->connection != nullptr) {
         mysql_close(impl_->connection);
         impl_->connection = nullptr;
@@ -40,6 +38,8 @@ void Database::connect()
     }
     impl_->connection = connection;
     mysql_options(connection, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout_seconds);
+    mysql_options(connection, MYSQL_OPT_READ_TIMEOUT, &config_.connect_timeout_seconds);
+    mysql_options(connection, MYSQL_OPT_WRITE_TIMEOUT, &config_.connect_timeout_seconds);
     mysql_options(connection, MYSQL_SET_CHARSET_NAME, "utf8mb4");
 
     if (mysql_real_connect(connection, config_.host.c_str(), config_.user.c_str(), config_.password.c_str(), nullptr,
@@ -57,9 +57,8 @@ void Database::connect()
     execute("SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'");
 }
 
-void Database::migrate()
-{
-    static constexpr std::array<std::string_view, 7> migrations = {
+void Database::migrate() {
+    static constexpr std::array<std::string_view, 7> version_1 = {
         R"sql(CREATE TABLE IF NOT EXISTS exchange_schema_versions (
             version INT NOT NULL PRIMARY KEY,
             applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
@@ -145,35 +144,148 @@ void Database::migrate()
         "INSERT IGNORE INTO exchange_schema_versions(version) VALUES (1)",
     };
 
-    for (const auto statement : migrations) {
+    for (const auto statement : version_1) {
         execute(statement);
     }
+
+    const auto version_2_applied = query("SELECT version FROM exchange_schema_versions WHERE version=2");
+    if (version_2_applied.empty()) {
+        // A target may be reopened later with a different item. Keep every market
+        // row immutable so historical orders, trades, and deliveries retain the
+        // exact item snapshot they were created for. This binding table is the
+        // single mutable pointer from a world target to its current market.
+        execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_target_bindings (
+            target_key VARCHAR(255) NOT NULL PRIMARY KEY,
+            market_id BIGINT UNSIGNED NOT NULL UNIQUE,
+            bound_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            CONSTRAINT fk_exchange_target_bindings_market
+                FOREIGN KEY (market_id) REFERENCES exchange_markets(id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+        execute(R"sql(INSERT INTO exchange_target_bindings(target_key, market_id)
+            SELECT target_key, id FROM exchange_markets WHERE active=1
+            ON DUPLICATE KEY UPDATE market_id=VALUES(market_id))sql");
+
+        const auto legacy_unique = query(R"sql(SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets' AND INDEX_NAME='target_key' LIMIT 1)sql");
+        if (!legacy_unique.empty()) {
+            execute("ALTER TABLE exchange_markets DROP INDEX target_key");
+        }
+        const auto history_index = query(R"sql(SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
+              AND INDEX_NAME='idx_exchange_markets_target_history' LIMIT 1)sql");
+        if (history_index.empty()) {
+            execute("CREATE INDEX idx_exchange_markets_target_history ON exchange_markets(target_key,id)");
+        }
+        execute("INSERT INTO exchange_schema_versions(version) VALUES (2)");
+    }
+
+    const auto version_3_applied = query("SELECT version FROM exchange_schema_versions WHERE version=3");
+    if (version_3_applied.empty()) {
+        const auto reserved_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_deliveries'
+              AND COLUMN_NAME='reserved_qty' LIMIT 1)sql");
+        if (reserved_column.empty()) {
+            execute("ALTER TABLE exchange_deliveries ADD COLUMN reserved_qty INT NOT NULL DEFAULT 0 AFTER claimed_qty");
+        }
+        const auto delivery_claim_check = query(R"sql(SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+            WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='exchange_deliveries'
+              AND CONSTRAINT_NAME='chk_exchange_deliveries_claims' LIMIT 1)sql");
+        if (delivery_claim_check.empty()) {
+            execute(R"sql(ALTER TABLE exchange_deliveries ADD CONSTRAINT chk_exchange_deliveries_claims
+                CHECK (claimed_qty >= 0 AND reserved_qty >= 0 AND claimed_qty + reserved_qty <= quantity))sql");
+        }
+        execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_delivery_claims (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            delivery_id BIGINT UNSIGNED NOT NULL,
+            player_uuid CHAR(36) NOT NULL,
+            quantity INT NOT NULL,
+            applied_qty INT NOT NULL DEFAULT 0,
+            status ENUM('PREPARED','APPLIED','CANCELED') NOT NULL DEFAULT 'PREPARED',
+            created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            applied_at TIMESTAMP(6) NULL,
+            cleaned_at TIMESTAMP(6) NULL,
+            INDEX idx_exchange_delivery_claims_unfinished (player_uuid,status,cleaned_at,id),
+            CONSTRAINT fk_exchange_delivery_claims_delivery
+                FOREIGN KEY (delivery_id) REFERENCES exchange_deliveries(id),
+            CHECK (quantity > 0),
+            CHECK (applied_qty >= 0 AND applied_qty <= quantity)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+        execute("INSERT INTO exchange_schema_versions(version) VALUES (3)");
+    }
+
+    const auto version_4_applied = query("SELECT version FROM exchange_schema_versions WHERE version=4");
+    if (version_4_applied.empty()) {
+        execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_sell_escrows (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            market_id BIGINT UNSIGNED NOT NULL,
+            player_uuid CHAR(36) NOT NULL,
+            player_name VARCHAR(64) NOT NULL,
+            order_type ENUM('LIMIT','MARKET') NOT NULL,
+            price_cents BIGINT NOT NULL,
+            requested_qty INT NOT NULL,
+            tagged_qty INT NOT NULL DEFAULT 0,
+            receipt_count INT NOT NULL DEFAULT 0,
+            status ENUM('PREPARED','TAGGED','ORDERED','CANCELED') NOT NULL DEFAULT 'PREPARED',
+            order_id BIGINT UNSIGNED NULL UNIQUE,
+            created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            tagged_at TIMESTAMP(6) NULL,
+            ordered_at TIMESTAMP(6) NULL,
+            cleaned_at TIMESTAMP(6) NULL,
+            INDEX idx_exchange_sell_escrows_unfinished (player_uuid,status,cleaned_at,id),
+            CONSTRAINT fk_exchange_sell_escrows_market FOREIGN KEY (market_id) REFERENCES exchange_markets(id),
+            CONSTRAINT fk_exchange_sell_escrows_account FOREIGN KEY (player_uuid) REFERENCES exchange_accounts(player_uuid),
+            CONSTRAINT fk_exchange_sell_escrows_order FOREIGN KEY (order_id) REFERENCES exchange_orders(id),
+            CHECK (price_cents >= 0),
+            CHECK (requested_qty > 0),
+            CHECK (tagged_qty = 0 OR tagged_qty >= requested_qty),
+            CHECK (receipt_count >= 0)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+        execute("INSERT INTO exchange_schema_versions(version) VALUES (4)");
+    }
+
+    const auto version_5_applied = query("SELECT version FROM exchange_schema_versions WHERE version=5");
+    if (!version_5_applied.empty()) {
+        return;
+    }
+    execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_balance_ledger (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        player_uuid CHAR(36) NOT NULL,
+        delta_cents BIGINT NOT NULL,
+        reason VARCHAR(48) NOT NULL,
+        reference_type VARCHAR(24) NULL,
+        reference_id BIGINT UNSIGNED NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        INDEX idx_exchange_balance_ledger_player (player_uuid,id),
+        INDEX idx_exchange_balance_ledger_reference (reference_type,reference_id),
+        CONSTRAINT fk_exchange_balance_ledger_account
+            FOREIGN KEY (player_uuid) REFERENCES exchange_accounts(player_uuid)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+    execute(R"sql(INSERT INTO exchange_balance_ledger(player_uuid,delta_cents,reason)
+        SELECT a.player_uuid,a.balance_cents,'MIGRATION_OPENING_BALANCE' FROM exchange_accounts a
+        WHERE NOT EXISTS (SELECT 1 FROM exchange_balance_ledger l WHERE l.player_uuid=a.player_uuid))sql");
+    execute("INSERT INTO exchange_schema_versions(version) VALUES (5)");
 }
 
-void Database::ping()
-{
+void Database::ping() {
     ensureConnected();
     if (mysql_ping(impl_->connection) != 0) {
         throw DatabaseError("database ping failed: " + std::string(mysql_error(impl_->connection)));
     }
 }
 
-void Database::execute(const std::string_view sql)
-{
+void Database::execute(const std::string_view sql) {
     ensureConnected();
     if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
         throw DatabaseError("database statement failed: " + std::string(mysql_error(impl_->connection)));
     }
     if (MYSQL_RES *result = mysql_store_result(impl_->connection); result != nullptr) {
         mysql_free_result(result);
-    }
-    else if (mysql_field_count(impl_->connection) != 0) {
+    } else if (mysql_field_count(impl_->connection) != 0) {
         throw DatabaseError("database result failed: " + std::string(mysql_error(impl_->connection)));
     }
 }
 
-QueryRows Database::query(const std::string_view sql)
-{
+QueryRows Database::query(const std::string_view sql) {
     ensureConnected();
     if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
         throw DatabaseError("database query failed: " + std::string(mysql_error(impl_->connection)));
@@ -195,8 +307,7 @@ QueryRows Database::query(const std::string_view sql)
         for (unsigned int index = 0; index < fields; ++index) {
             if (raw[index] == nullptr) {
                 row.emplace_back(std::nullopt);
-            }
-            else {
+            } else {
                 row.emplace_back(std::string(raw[index], lengths[index]));
             }
         }
@@ -206,14 +317,12 @@ QueryRows Database::query(const std::string_view sql)
     return rows;
 }
 
-std::uint64_t Database::lastInsertId() const
-{
+std::uint64_t Database::lastInsertId() const {
     ensureConnected();
     return mysql_insert_id(impl_->connection);
 }
 
-std::uint64_t Database::affectedRows() const
-{
+std::uint64_t Database::affectedRows() const {
     ensureConnected();
     const auto rows = mysql_affected_rows(impl_->connection);
     if (rows == std::numeric_limits<my_ulonglong>::max()) {
@@ -222,35 +331,30 @@ std::uint64_t Database::affectedRows() const
     return rows;
 }
 
-void Database::begin()
-{
+void Database::begin() {
     execute("START TRANSACTION");
 }
 
-void Database::commit()
-{
+void Database::commit() {
     execute("COMMIT");
 }
 
-void Database::rollback() noexcept
-{
+void Database::rollback() noexcept {
     if (impl_ != nullptr && impl_->connection != nullptr) {
         mysql_rollback(impl_->connection);
     }
 }
 
-std::string Database::quote(const std::string_view value) const
-{
+std::string Database::quote(const std::string_view value) const {
     ensureConnected();
     std::string escaped(value.size() * 2 + 1, '\0');
     const auto length = mysql_real_escape_string(impl_->connection, escaped.data(), value.data(),
-                                                  static_cast<unsigned long>(value.size()));
+                                                 static_cast<unsigned long>(value.size()));
     escaped.resize(length);
     return "'" + escaped + "'";
 }
 
-std::string Database::hexLiteral(const std::vector<std::uint8_t> &value)
-{
+std::string Database::hexLiteral(const std::vector<std::uint8_t> &value) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string result;
     result.reserve(3 + value.size() * 2);
@@ -263,33 +367,28 @@ std::string Database::hexLiteral(const std::vector<std::uint8_t> &value)
     return result;
 }
 
-void Database::ensureConnected() const
-{
+void Database::ensureConnected() const {
     if (impl_ == nullptr || impl_->connection == nullptr) {
         throw DatabaseError("database is not connected");
     }
 }
 
-Transaction::Transaction(Database &database) : database_(database)
-{
+Transaction::Transaction(Database &database) : database_(database) {
     database_.begin();
 }
 
-Transaction::~Transaction()
-{
+Transaction::~Transaction() {
     if (!committed_) {
         database_.rollback();
     }
 }
 
-void Transaction::commit()
-{
+void Transaction::commit() {
     database_.commit();
     committed_ = true;
 }
 
-std::int64_t cellInt64(const QueryRow &row, const std::size_t index)
-{
+std::int64_t cellInt64(const QueryRow &row, const std::size_t index) {
     const auto value = cellString(row, index);
     std::size_t consumed = 0;
     const auto result = std::stoll(value, &consumed);
@@ -299,8 +398,7 @@ std::int64_t cellInt64(const QueryRow &row, const std::size_t index)
     return result;
 }
 
-int cellInt(const QueryRow &row, const std::size_t index)
-{
+int cellInt(const QueryRow &row, const std::size_t index) {
     const auto value = cellInt64(row, index);
     if (value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
         throw DatabaseError("database integer is outside int range");
@@ -308,12 +406,11 @@ int cellInt(const QueryRow &row, const std::size_t index)
     return static_cast<int>(value);
 }
 
-std::string cellString(const QueryRow &row, const std::size_t index)
-{
+std::string cellString(const QueryRow &row, const std::size_t index) {
     if (index >= row.size() || !row[index].has_value()) {
         throw DatabaseError("database returned an unexpected NULL value");
     }
     return *row[index];
 }
 
-}  // namespace exchange
+} // namespace exchange

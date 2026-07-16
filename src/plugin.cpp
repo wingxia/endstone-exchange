@@ -1,40 +1,49 @@
 #include "endstone_exchange/plugin.hpp"
 
+#include "endstone_exchange/inventory_escrow.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 #include "endstone_exchange/version.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
-#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <string_view>
 
 namespace exchange {
+
+struct HologramSnapshotState {
+    std::mutex mutex;
+    std::optional<std::unordered_map<Id, OrderBook>> ready_snapshot;
+    std::optional<std::string> error;
+    std::atomic_bool query_running{false};
+    std::atomic_bool stopping{false};
+};
+
 namespace {
 
 constexpr std::string_view TargetTagPrefix = "exchange_target_";
 constexpr std::string_view HologramTagPrefix = "exchange_hologram_";
 
-bool isItemFrameBlock(const std::string_view block_type)
-{
+bool isItemFrameBlock(const std::string_view block_type) {
     return block_type == "minecraft:frame" || block_type == "minecraft:glow_frame" ||
            block_type == "minecraft:item_frame" || block_type == "minecraft:glow_item_frame";
 }
 
-std::string lower(std::string value)
-{
+std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
     return value;
 }
 
-std::string stripFormatting(const std::string_view value)
-{
+std::string stripFormatting(const std::string_view value) {
     std::string result;
     result.reserve(value.size());
     for (std::size_t index = 0; index < value.size(); ++index) {
@@ -58,8 +67,7 @@ std::string stripFormatting(const std::string_view value)
     return result;
 }
 
-std::string friendlyItemName(const endstone::ItemStack &item)
-{
+std::string friendlyItemName(const endstone::ItemStack &item) {
     if (const auto meta = item.getItemMeta(); meta && meta->hasDisplayName()) {
         const auto name = stripFormatting(meta->getDisplayName());
         if (!name.empty()) {
@@ -74,39 +82,9 @@ std::string friendlyItemName(const endstone::ItemStack &item)
     return type;
 }
 
-std::vector<endstone::ItemStack> splitStacks(const ItemPrototype &prototype, const int quantity)
-{
-    endstone::ItemStack sample(endstone::ItemTypeId(prototype.type), 1, prototype.data);
-    if (!prototype.nbt.empty()) {
-        sample.setNbt(NbtCodec::decode(prototype.nbt));
-    }
-    const int stack_size = std::max(1, sample.getMaxStackSize());
-    std::vector<endstone::ItemStack> result;
-    int remaining = quantity;
-    while (remaining > 0) {
-        auto stack = sample;
-        const int amount = std::min(remaining, stack_size);
-        stack.setAmount(amount);
-        result.push_back(std::move(stack));
-        remaining -= amount;
-    }
-    return result;
-}
+} // namespace
 
-int itemCount(const std::unordered_map<int, endstone::ItemStack> &items)
-{
-    int result = 0;
-    for (const auto &[slot, item] : items) {
-        static_cast<void>(slot);
-        result += item.getAmount();
-    }
-    return result;
-}
-
-}  // namespace
-
-void ExchangePlugin::onEnable()
-{
+void ExchangePlugin::onEnable() {
     const auto config_path = getDataFolder() / "config.toml";
     try {
         if (!std::filesystem::exists(config_path)) {
@@ -124,6 +102,7 @@ void ExchangePlugin::onEnable()
         database_->migrate();
         service_ = std::make_unique<ExchangeService>(*database_, config_.market.initial_balance_cents,
                                                      config_.market.max_order_quantity);
+        hologram_snapshot_state_ = std::make_shared<HologramSnapshotState>();
 
         registerEvent(&ExchangePlugin::onPlayerInteract, *this, endstone::EventPriority::High, true);
         registerEvent(&ExchangePlugin::onPlayerInteractActor, *this, endstone::EventPriority::High, true);
@@ -131,6 +110,7 @@ void ExchangePlugin::onEnable()
         registerEvent(&ExchangePlugin::onActorDamage, *this, endstone::EventPriority::Highest, true);
         registerEvent(&ExchangePlugin::onActorRemove, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onPlayerJoin, *this, endstone::EventPriority::Monitor);
+        registerEvent(&ExchangePlugin::onPlayerDropItem, *this, endstone::EventPriority::Highest, true);
 
         ready_ = true;
         restoreMarkets();
@@ -138,16 +118,17 @@ void ExchangePlugin::onEnable()
             *this, [this] { refreshHolograms(); }, 1, config_.market.hologram_refresh_ticks);
         getLogger().info("Endstone Exchange {} enabled with {} active markets.", ENDSTONE_EXCHANGE_VERSION,
                          markets_.size());
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         ready_ = false;
         getLogger().error("Exchange startup failed: {}", error.what());
     }
 }
 
-void ExchangePlugin::onDisable()
-{
+void ExchangePlugin::onDisable() {
     ready_ = false;
+    if (hologram_snapshot_state_) {
+        hologram_snapshot_state_->stopping = true;
+    }
     if (refresh_task_) {
         refresh_task_->cancel();
         refresh_task_.reset();
@@ -155,8 +136,8 @@ void ExchangePlugin::onDisable()
     if (config_.market.cleanup_structure_captures) {
         for (const auto &[key, structure_name] : pending_frame_captures_) {
             static_cast<void>(key);
-            static_cast<void>(getServer().dispatchCommand(
-                getServer().getCommandSender(), std::format("structure delete {}", structure_name)));
+            static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
+                                                          std::format("structure delete {}", structure_name)));
         }
     }
     pending_frame_captures_.clear();
@@ -165,12 +146,13 @@ void ExchangePlugin::onDisable()
     database_.reset();
     markets_.clear();
     target_index_.clear();
+    hologram_books_.clear();
+    hologram_snapshot_state_.reset();
     getLogger().info("Endstone Exchange disabled.");
 }
 
 bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::Command &command,
-                               const std::vector<std::string> &args)
-{
+                               const std::vector<std::string> &args) {
     if (command.getName() != "exchange") {
         return false;
     }
@@ -184,7 +166,8 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
         if (args.empty()) {
             if (player != nullptr) {
                 service_->ensureAccount(player->getUniqueId().str(), player->getName());
-                sender.sendMessage("§6交易所§r 余额：§e{}§r", formatMoney(service_->balance(player->getUniqueId().str())));
+                sender.sendMessage("§6交易所§r 余额：§e{}§r",
+                                   formatMoney(service_->balance(player->getUniqueId().str())));
             }
             sender.sendMessage("/exchange give | balance | orders | claim | addbalance <玩家> <金额> | status");
             return true;
@@ -203,8 +186,7 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
                     sender.sendErrorMessage("目标玩家不在线。");
                     return true;
                 }
-            }
-            else if (args.size() != 1 || target == nullptr) {
+            } else if (args.size() != 1 || target == nullptr) {
                 sender.sendErrorMessage("用法：/exchange give [在线玩家]");
                 return true;
             }
@@ -276,22 +258,25 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
             return true;
         }
         sender.sendErrorMessage("未知子命令。");
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         sender.sendErrorMessage("交易所操作失败：{}", error.what());
         getLogger().warning("Command failed: {}", error.what());
     }
     return true;
 }
 
-void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event)
-{
+void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
     if (!ready_ || event.getAction() != endstone::PlayerInteractEvent::Action::RightClickBlock ||
         event.getBlock() == nullptr) {
         return;
     }
     auto &player = event.getPlayer();
     auto &block = *event.getBlock();
+    if (event.getItem() && isInternalEscrowItem(*event.getItem())) {
+        event.cancel();
+        player.sendErrorMessage("该物品正在由交易所恢复，暂时不能使用。");
+        return;
+    }
     const auto key = blockTargetKey(block);
     if (isExchanger(event.getItem())) {
         event.cancel();
@@ -304,14 +289,18 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event)
     }
 }
 
-void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &event)
-{
+void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &event) {
     if (!ready_) {
         return;
     }
     auto &player = event.getPlayer();
     auto &actor = event.getActor();
     const auto held = player.getInventory().getItemInMainHand();
+    if (held && isInternalEscrowItem(*held)) {
+        event.cancel();
+        player.sendErrorMessage("该物品正在由交易所恢复，暂时不能使用。");
+        return;
+    }
     if (isExchanger(held)) {
         event.cancel();
         const auto market_id = marketIdForActor(actor);
@@ -328,8 +317,7 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
     }
 }
 
-void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event)
-{
+void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
     if (!ready_) {
         return;
     }
@@ -339,8 +327,7 @@ void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event)
     }
 }
 
-void ExchangePlugin::onActorDamage(endstone::ActorDamageEvent &event)
-{
+void ExchangePlugin::onActorDamage(endstone::ActorDamageEvent &event) {
     if (!ready_) {
         return;
     }
@@ -353,8 +340,7 @@ void ExchangePlugin::onActorDamage(endstone::ActorDamageEvent &event)
     }
 }
 
-void ExchangePlugin::onActorRemove(endstone::ActorRemoveEvent &event)
-{
+void ExchangePlugin::onActorRemove(endstone::ActorRemoveEvent &event) {
     if (!ready_) {
         return;
     }
@@ -378,8 +364,7 @@ void ExchangePlugin::onActorRemove(endstone::ActorRemoveEvent &event)
     }
 }
 
-void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event)
-{
+void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
     if (!ready_) {
         return;
     }
@@ -387,14 +372,19 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event)
         auto &player = event.getPlayer();
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
         claimDeliveries(player);
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         getLogger().warning("Join settlement failed for {}: {}", event.getPlayer().getName(), error.what());
     }
 }
 
-bool ExchangePlugin::isExchanger(const std::optional<endstone::ItemStack> &item) const
-{
+void ExchangePlugin::onPlayerDropItem(endstone::PlayerDropItemEvent &event) {
+    if (isInternalEscrowItem(event.getItem())) {
+        event.setCancelled(true);
+        event.getPlayer().sendErrorMessage("该物品正在由交易所恢复，暂时不能丢弃。");
+    }
+}
+
+bool ExchangePlugin::isExchanger(const std::optional<endstone::ItemStack> &item) const {
     if (!item || std::string(item->getType().getId()) != "minecraft:stick") {
         return false;
     }
@@ -402,23 +392,19 @@ bool ExchangePlugin::isExchanger(const std::optional<endstone::ItemStack> &item)
     return meta && meta->hasDisplayName() && lower(stripFormatting(meta->getDisplayName())) == "exchanger";
 }
 
-bool ExchangePlugin::canAdmin(endstone::Player &player) const
-{
+bool ExchangePlugin::canAdmin(endstone::Player &player) const {
     return !config_.market.admin_only || player.hasPermission("exchange.admin");
 }
 
-std::string ExchangePlugin::blockTargetKey(const endstone::Block &block) const
-{
+std::string ExchangePlugin::blockTargetKey(const endstone::Block &block) const {
     return std::format("block|{}|{}|{}|{}", block.getDimension().getName(), block.getX(), block.getY(), block.getZ());
 }
 
-std::string ExchangePlugin::actorTargetKey(const endstone::Actor &actor) const
-{
+std::string ExchangePlugin::actorTargetKey(const endstone::Actor &actor) const {
     return std::format("actor|{}|{}", actor.getDimension().getName(), actor.getId());
 }
 
-std::optional<Id> ExchangePlugin::marketIdForActor(const endstone::Actor &actor) const
-{
+std::optional<Id> ExchangePlugin::marketIdForActor(const endstone::Actor &actor) const {
     for (const auto &[market_id, market] : markets_) {
         if (market.target_kind == TargetKind::Actor && hasTag(actor, targetTag(market_id))) {
             return market_id;
@@ -430,14 +416,12 @@ std::optional<Id> ExchangePlugin::marketIdForActor(const endstone::Actor &actor)
     return std::nullopt;
 }
 
-std::optional<ItemPrototype> ExchangePlugin::prototypeForBlock(endstone::Block &block)
-{
+std::optional<ItemPrototype> ExchangePlugin::prototypeForBlock(endstone::Block &block) {
     const auto block_type = block.getType();
     std::vector<std::string> candidates{block_type};
     if (block_type == "minecraft:frame") {
         candidates.push_back("minecraft:item_frame");
-    }
-    else if (block_type == "minecraft:glow_frame") {
+    } else if (block_type == "minecraft:glow_frame") {
         candidates.push_back("minecraft:glow_item_frame");
     }
     for (const auto &candidate : candidates) {
@@ -449,8 +433,7 @@ std::optional<ItemPrototype> ExchangePlugin::prototypeForBlock(endstone::Block &
     return std::nullopt;
 }
 
-std::optional<ItemPrototype> ExchangePlugin::prototypeForActor(endstone::Actor &actor)
-{
+std::optional<ItemPrototype> ExchangePlugin::prototypeForActor(endstone::Actor &actor) {
     if (const auto *item_actor = actor.asItem(); item_actor != nullptr) {
         const auto item = item_actor->getItemStack();
         return ItemPrototype{std::string(item.getType().getId()), item.getData(), NbtCodec::encode(item.getNbt()),
@@ -470,8 +453,7 @@ std::optional<ItemPrototype> ExchangePlugin::prototypeForActor(endstone::Actor &
     return std::nullopt;
 }
 
-endstone::ItemStack ExchangePlugin::makeItemStack(const ItemPrototype &prototype, const int amount) const
-{
+endstone::ItemStack ExchangePlugin::makeItemStack(const ItemPrototype &prototype, const int amount) const {
     endstone::ItemStack item(endstone::ItemTypeId(prototype.type), amount, prototype.data);
     if (!prototype.nbt.empty()) {
         item.setNbt(NbtCodec::decode(prototype.nbt));
@@ -479,8 +461,7 @@ endstone::ItemStack ExchangePlugin::makeItemStack(const ItemPrototype &prototype
     return item;
 }
 
-void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &block)
-{
+void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &block) {
     if (!canAdmin(player)) {
         player.sendErrorMessage("你没有使用 exchanger 标记市场的权限。");
         return;
@@ -513,20 +494,18 @@ void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &bloc
         indexMarket(market);
         refreshHologram(market);
         player.sendMessage("§a已将该物体设为可交易：§f{}§r", market.item.name);
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         player.sendErrorMessage("建立市场失败：{}", error.what());
         getLogger().warning("Block activation failed: {}", error.what());
     }
 }
 
-void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Block &block)
-{
+void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Block &block) {
     const auto key = blockTargetKey(block);
     if (const auto pending = pending_frame_captures_.find(key); pending != pending_frame_captures_.end()) {
         if (config_.market.cleanup_structure_captures) {
-            static_cast<void>(getServer().dispatchCommand(
-                getServer().getCommandSender(), std::format("structure delete {}", pending->second)));
+            static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
+                                                          std::format("structure delete {}", pending->second)));
         }
         pending_frame_captures_.erase(pending);
         player.sendMessage("§e已取消展示框的可交易设置。§r");
@@ -539,8 +518,8 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
         return;
     }
     const auto serial = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto structure_name = std::format("exchange:frame_{}_{}_{}_{}", block.getX(), block.getY(), block.getZ(),
-                                            serial);
+    const auto structure_name =
+        std::format("exchange:frame_{}_{}_{}_{}", block.getX(), block.getY(), block.getZ(), serial);
     const auto dimension_name = block.getDimension().getName();
     const auto level_name = level->getName();
     const int x = block.getX();
@@ -568,8 +547,8 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
             pending_frame_captures_.erase(pending);
             const auto cleanup = [this, &structure_name] {
                 if (config_.market.cleanup_structure_captures) {
-                    static_cast<void>(getServer().dispatchCommand(
-                        getServer().getCommandSender(), std::format("structure delete {}", structure_name)));
+                    static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
+                                                                  std::format("structure delete {}", structure_name)));
                 }
             };
             auto *notify = getServer().getPlayer(player_name);
@@ -582,8 +561,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                     return;
                 }
                 const auto database_path = std::filesystem::current_path() / "worlds" / level_name / "db";
-                const auto captured =
-                    StructureReader::readItemFrameFromLevelDbLogs(database_path, structure_name);
+                const auto captured = StructureReader::readItemFrameFromLevelDbLogs(database_path, structure_name);
                 const auto *current_level = getServer().getLevel();
                 auto *dimension = current_level == nullptr ? nullptr : current_level->getDimension(dimension_name);
                 auto current_block = dimension == nullptr ? nullptr : dimension->getBlockAt(x, y, z);
@@ -601,8 +579,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                     item.setNbt(captured->nbt);
                     prototype = ItemPrototype{captured->type, captured->data, NbtCodec::encode(captured->nbt),
                                               friendlyItemName(item)};
-                }
-                else {
+                } else {
                     prototype = prototypeForBlock(*current_block);
                 }
                 if (!prototype) {
@@ -625,8 +602,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                     notify->sendMessage("§a已将展示框设为可交易：§f{}§r", market.item.name);
                 }
                 cleanup();
-            }
-            catch (const std::exception &error) {
+            } catch (const std::exception &error) {
                 cleanup();
                 if (notify != nullptr) {
                     notify->sendErrorMessage("建立展示框市场失败：{}", error.what());
@@ -637,8 +613,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
         config_.market.frame_capture_delay_ticks));
 }
 
-void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &actor)
-{
+void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &actor) {
     if (!canAdmin(player)) {
         player.sendErrorMessage("你没有使用 exchanger 标记市场的权限。");
         return;
@@ -665,15 +640,13 @@ void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &acto
         indexMarket(market);
         refreshHologram(market);
         player.sendMessage("§a已将该实体设为可交易：§f{}§r", market.item.name);
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         player.sendErrorMessage("建立市场失败：{}", error.what());
         getLogger().warning("Actor activation failed: {}", error.what());
     }
 }
 
-void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, const std::string_view reason)
-{
+void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, const std::string_view reason) {
     try {
         const auto it = markets_.find(market_id);
         if (it == markets_.end()) {
@@ -691,8 +664,7 @@ void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, co
             player->sendMessage("§e已取消可交易状态；所有挂单已撤销并退款/退物。§r");
         }
         getLogger().info("Market {} deactivated: {}", market_id, reason);
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         if (player != nullptr) {
             player->sendErrorMessage("取消市场失败：{}", error.what());
         }
@@ -700,25 +672,24 @@ void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, co
     }
 }
 
-void ExchangePlugin::indexMarket(const Market &market)
-{
+void ExchangePlugin::indexMarket(const Market &market) {
     markets_[market.id] = market;
     target_index_[market.target_key] = market.id;
 }
 
-void ExchangePlugin::unindexMarket(const Id market_id)
-{
+void ExchangePlugin::unindexMarket(const Id market_id) {
     if (const auto it = markets_.find(market_id); it != markets_.end()) {
         target_index_.erase(it->second.target_key);
         markets_.erase(it);
     }
 }
 
-void ExchangePlugin::restoreMarkets()
-{
+void ExchangePlugin::restoreMarkets() {
     markets_.clear();
     target_index_.clear();
     hologram_ids_.clear();
+    hologram_books_.clear();
+    hologram_snapshot_state_.reset();
     if (const auto *level = getServer().getLevel(); level != nullptr) {
         for (auto *actor : level->getActors()) {
             if (actor == nullptr) {
@@ -738,8 +709,7 @@ void ExchangePlugin::restoreMarkets()
     refreshHolograms();
 }
 
-void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
-{
+void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id) {
     try {
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
@@ -768,18 +738,17 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
 
         Cents reference = book.last_price_cents.value_or(1000);
         if (!book.bids.empty() && !book.asks.empty()) {
-            reference = (book.bids.front().price_cents + book.asks.front().price_cents) / 2;
-        }
-        else if (!book.bids.empty()) {
+            reference = std::midpoint(book.bids.front().price_cents, book.asks.front().price_cents);
+        } else if (!book.bids.empty()) {
             reference = book.bids.front().price_cents;
-        }
-        else if (!book.asks.empty()) {
+        } else if (!book.asks.empty()) {
             reference = book.asks.front().price_cents;
         }
-        const auto low = std::max(config_.market.price_min_cents, reference / 2);
-        const auto high = std::min(config_.market.price_max_cents,
-                                   std::max(reference * 2, low + config_.market.price_step_cents * 100));
-        const auto default_price = std::clamp(reference, low, high);
+        const auto price_window = makePriceSliderWindow(config_.market.price_min_cents, config_.market.price_max_cents,
+                                                        config_.market.price_step_cents, reference);
+        const auto price_label = std::format(
+            "限价档位（{} 至 {}，每格 {}；直接交易忽略）", formatMoney(price_window.base_cents),
+            formatMoney(price_window.priceAt(price_window.max_index)), formatMoney(price_window.step_cents));
 
         endstone::ModalForm form;
         form.setTitle("交易所 · " + market_it->second.item.name)
@@ -787,31 +756,27 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
             .addControl(endstone::Label(book_text))
             .addControl(endstone::Label("§6余额：§e" + formatMoney(account_balance) + "§r"))
             .addControl(endstone::Divider())
-            .addControl(endstone::Dropdown("交易方式", {"限价买入", "限价卖出", "直接买入（吃卖盘）", "直接卖出（吃买盘）"}, 0))
-            .addControl(endstone::Slider("数量", 1.0F, static_cast<float>(config_.market.max_order_quantity), 1.0F,
-                                         1.0F))
-            .addControl(endstone::Slider("限价（直接交易时忽略）", static_cast<float>(low) / 100.0F,
-                                         static_cast<float>(high) / 100.0F,
-                                         static_cast<float>(config_.market.price_step_cents) / 100.0F,
-                                         static_cast<float>(default_price) / 100.0F))
+            .addControl(
+                endstone::Dropdown("交易方式", {"限价买入", "限价卖出", "直接买入（吃卖盘）", "直接卖出（吃买盘）"}, 0))
+            .addControl(
+                endstone::Slider("数量", 1.0F, static_cast<float>(config_.market.max_order_quantity), 1.0F, 1.0F))
+            .addControl(endstone::Slider(price_label, 0.0F, static_cast<float>(price_window.max_index), 1.0F,
+                                         static_cast<float>(price_window.default_index)))
             .setSubmitButton("提交交易")
-            .setOnSubmit([this, market_id](endstone::Player *form_player, std::string response) {
+            .setOnSubmit([this, market_id, price_window](endstone::Player *form_player, std::string response) {
                 if (form_player != nullptr && ready_) {
-                    submitTradeForm(*form_player, market_id, response);
+                    submitTradeForm(*form_player, market_id, price_window, response);
                 }
             });
         player.sendForm(std::move(form));
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         player.sendErrorMessage("打开交易界面失败：{}", error.what());
         getLogger().warning("Open form failed: {}", error.what());
     }
 }
 
-void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_id, const std::string_view response)
-{
-    bool removed_for_sell = false;
-    int removed_quantity = 0;
+void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_id,
+                                     const PriceSliderWindow &price_window, const std::string_view response) {
     try {
         const auto values = numericFormValues(response);
         if (values.size() < 3) {
@@ -830,36 +795,17 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
         const auto quantity = static_cast<int>(rounded_quantity);
         Cents price_cents = 0;
         if (action < 2) {
-            const auto raw_price_cents = static_cast<long double>(values[2]) * 100.0L;
-            if (raw_price_cents < static_cast<long double>(config_.market.price_min_cents) ||
-                raw_price_cents > static_cast<long double>(config_.market.price_max_cents)) {
-                throw std::runtime_error("限价超出允许范围");
+            const auto rounded_price_index = std::round(values[2]);
+            if (values[2] != rounded_price_index || rounded_price_index < 0.0 ||
+                rounded_price_index > static_cast<double>(price_window.max_index)) {
+                throw std::runtime_error("限价档位无效");
             }
-            price_cents = static_cast<Cents>(std::llround(raw_price_cents));
+            price_cents = price_window.priceAt(static_cast<int>(rounded_price_index));
         }
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
             throw std::runtime_error("市场已经关闭");
         }
-        const bool selling = action == 1 || action == 3;
-        if (selling) {
-            auto sample = makeItemStack(market_it->second.item, 1);
-            auto &inventory = player.getInventory();
-            if (!inventory.containsAtLeast(sample, quantity)) {
-                throw std::runtime_error("背包中没有足够的对应物品（物品 NBT 必须一致）");
-            }
-            const auto leftovers = inventory.removeItem(splitStacks(market_it->second.item, quantity));
-            const int not_removed = itemCount(leftovers);
-            removed_quantity = quantity - not_removed;
-            if (not_removed != 0) {
-                if (removed_quantity > 0) {
-                    static_cast<void>(inventory.addItem(splitStacks(market_it->second.item, removed_quantity)));
-                }
-                throw std::runtime_error("从背包托管物品时数量发生变化，请重试");
-            }
-            removed_for_sell = true;
-        }
-
         OrderRequest request;
         request.market_id = market_id;
         request.player_uuid = player.getUniqueId().str();
@@ -868,31 +814,83 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
         request.type = action < 2 ? OrderType::Limit : OrderType::Market;
         request.price_cents = price_cents;
         request.quantity = quantity;
-        const auto result = service_->placeOrder(request);
-        removed_for_sell = false;
+        const auto result =
+            request.side == Side::Sell ? submitSellEscrow(player, request) : service_->placeOrder(request);
         claimDeliveries(player);
         refreshHologram(market_it->second);
         player.sendMessage("§a交易已提交：成交 {}，挂单 {}，成交额 {}，余额 {}。§r", result.filled_quantity,
                            result.open_quantity, formatMoney(result.gross_cents), formatMoney(result.balance_cents));
-    }
-    catch (const std::exception &error) {
-        if (removed_for_sell && removed_quantity > 0) {
-            const auto market_it = markets_.find(market_id);
-            if (market_it != markets_.end()) {
-                auto leftovers = player.getInventory().addItem(splitStacks(market_it->second.item, removed_quantity));
-                for (const auto &[slot, item] : leftovers) {
-                    static_cast<void>(slot);
-                    static_cast<void>(player.getDimension().dropItem(player.getLocation(), item));
-                }
-            }
-        }
+    } catch (const std::exception &error) {
         player.sendErrorMessage("交易失败：{}", error.what());
         getLogger().warning("Trade submission failed for {}: {}", player.getName(), error.what());
     }
 }
 
-void ExchangePlugin::openOrdersForm(endstone::Player &player)
-{
+ExecutionResult ExchangePlugin::submitSellEscrow(endstone::Player &player, const OrderRequest &request) {
+    auto &inventory = player.getInventory();
+    const auto sample = makeItemStack(markets_.at(request.market_id).item, 1);
+    if (!inventory.containsAtLeast(sample, request.quantity)) {
+        throw std::runtime_error("背包中没有足够的对应物品（物品 NBT 必须一致）");
+    }
+
+    const auto escrow = service_->prepareSellEscrow(request);
+    try {
+        const auto tagged = tagSellItems(inventory, escrow.item, escrow.requested_quantity, escrow.id);
+        service_->markSellEscrowTagged(escrow.id, tagged.quantity, tagged.stacks);
+        replaceTaggedSellItemsWithReceipts(inventory, escrow.id);
+        if (sellReceiptCount(inventory, escrow.id) != tagged.stacks) {
+            throw std::runtime_error("卖出托管凭据数量不一致，已保留恢复状态");
+        }
+        auto result = service_->executeSellEscrow(escrow.id);
+        removeSellReceipts(inventory, escrow.id);
+        service_->markSellEscrowCleaned(escrow.id);
+        return result;
+    } catch (const std::exception &error) {
+        const std::string original_error = error.what();
+        try {
+            reconcileSellEscrows(player);
+            return service_->executeSellEscrow(escrow.id);
+        } catch (const std::exception &recovery_error) {
+            getLogger().warning("Sell escrow {} remains recoverable for {}: {}", escrow.id, player.getName(),
+                                recovery_error.what());
+        }
+        throw std::runtime_error(original_error);
+    }
+}
+
+void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
+    auto &inventory = player.getInventory();
+    for (auto escrow : service_->unfinishedSellEscrows(player.getUniqueId().str())) {
+        if (escrow.status == SellEscrowStatus::Prepared) {
+            const auto tagged = taggedSellItems(inventory, escrow.id);
+            if (tagged.quantity < escrow.requested_quantity) {
+                if (tagged.quantity > 0) {
+                    restoreTaggedSellItems(inventory, escrow.id, escrow.item);
+                }
+                service_->cancelSellEscrow(escrow.id);
+                continue;
+            }
+            service_->markSellEscrowTagged(escrow.id, tagged.quantity, tagged.stacks);
+            escrow.tagged_quantity = tagged.quantity;
+            escrow.receipt_count = tagged.stacks;
+            escrow.status = SellEscrowStatus::Tagged;
+        }
+        if (escrow.status == SellEscrowStatus::Tagged) {
+            replaceTaggedSellItemsWithReceipts(inventory, escrow.id);
+            if (sellReceiptCount(inventory, escrow.id) != escrow.receipt_count) {
+                throw std::runtime_error("卖出托管凭据尚未完整恢复");
+            }
+            static_cast<void>(service_->executeSellEscrow(escrow.id));
+            escrow.status = SellEscrowStatus::Ordered;
+        }
+        if (escrow.status == SellEscrowStatus::Ordered) {
+            removeSellReceipts(inventory, escrow.id);
+            service_->markSellEscrowCleaned(escrow.id);
+        }
+    }
+}
+
+void ExchangePlugin::openOrdersForm(endstone::Player &player) {
     try {
         const auto player_uuid = player.getUniqueId().str();
         const auto orders = service_->openOrders(player_uuid);
@@ -902,9 +900,9 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player)
             form.addLabel("当前没有未完成挂单。");
         }
         for (const auto &order : orders) {
-            const auto text = std::format("#{} {} {} × {}\n点击撤单", order.id,
-                                          order.side == Side::Buy ? "§a买§r" : "§c卖§r", order.item_name,
-                                          order.remaining_quantity);
+            const auto text =
+                std::format("#{} {} {} × {}\n点击撤单", order.id, order.side == Side::Buy ? "§a买§r" : "§c卖§r",
+                            order.item_name, order.remaining_quantity);
             form.addButton(text, std::nullopt, [this, order_id = order.id, player_uuid](endstone::Player *form_player) {
                 if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
                     return;
@@ -914,37 +912,55 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player)
                     claimDeliveries(*form_player);
                     refreshHolograms();
                     form_player->sendMessage("§a挂单 #{} 已撤销。§r", order_id);
-                }
-                catch (const std::exception &error) {
+                } catch (const std::exception &error) {
                     form_player->sendErrorMessage("撤单失败：{}", error.what());
                 }
             });
         }
         player.sendForm(std::move(form));
-    }
-    catch (const std::exception &error) {
+    } catch (const std::exception &error) {
         player.sendErrorMessage("读取挂单失败：{}", error.what());
     }
 }
 
-void ExchangePlugin::claimDeliveries(endstone::Player &player)
-{
-    const auto deliveries = service_->pendingDeliveries(player.getUniqueId().str());
+void ExchangePlugin::claimDeliveries(endstone::Player &player) {
+    reconcileSellEscrows(player);
+    const auto player_uuid = player.getUniqueId().str();
+    auto &inventory = player.getInventory();
     int delivered_total = 0;
+    for (const auto &claim : service_->unfinishedDeliveryClaims(player_uuid)) {
+        const auto tagged = taggedItemCount(inventory, claim.id);
+        if (claim.status == DeliveryClaimStatus::Prepared) {
+            const auto delivered = std::min(tagged, claim.quantity);
+            service_->completeDeliveryClaim(claim.id, delivered);
+            delivered_total += delivered;
+            if (delivered == 0) {
+                continue;
+            }
+        }
+        if (tagged > 0) {
+            clearDeliveryClaimTag(inventory, claim.id, claim.item);
+        }
+        service_->markDeliveryClaimCleaned(claim.id);
+    }
+
+    const auto deliveries = service_->pendingDeliveries(player_uuid);
     for (const auto &delivery : deliveries) {
-        const int pending = delivery.quantity - delivery.claimed_quantity;
+        const int pending = delivery.quantity - delivery.claimed_quantity - delivery.reserved_quantity;
         if (pending <= 0) {
             continue;
         }
-        auto stacks = splitStacks(delivery.item, pending);
-        const int attempted = std::accumulate(stacks.begin(), stacks.end(), 0,
-                                              [](int total, const endstone::ItemStack &item) {
-                                                  return total + item.getAmount();
-                                              });
-        const auto leftovers = player.getInventory().addItem(std::move(stacks));
+        const auto claim = service_->prepareDeliveryClaim(delivery.id, player_uuid, pending);
+        auto stacks = splitStacks(delivery.item, claim.quantity, claim.id);
+        const int attempted =
+            std::accumulate(stacks.begin(), stacks.end(), 0,
+                            [](int total, const endstone::ItemStack &item) { return total + item.getAmount(); });
+        const auto leftovers = inventory.addItem(std::move(stacks));
         const int delivered = attempted - itemCount(leftovers);
+        service_->completeDeliveryClaim(claim.id, delivered);
         if (delivered > 0) {
-            service_->markDeliveryClaimed(delivery.id, delivered);
+            clearDeliveryClaimTag(inventory, claim.id, delivery.item);
+            service_->markDeliveryClaimCleaned(claim.id);
             delivered_total += delivered;
         }
         if (!leftovers.empty()) {
@@ -956,8 +972,7 @@ void ExchangePlugin::claimDeliveries(endstone::Player &player)
     }
 }
 
-void ExchangePlugin::giveExchanger(endstone::Player &player)
-{
+void ExchangePlugin::giveExchanger(endstone::Player &player) {
     endstone::ItemStack stick(endstone::ItemTypeId("minecraft:stick"), 1);
     auto meta = stick.getItemMeta();
     meta->setDisplayName("exchanger");
@@ -973,31 +988,89 @@ void ExchangePlugin::giveExchanger(endstone::Player &player)
     player.sendMessage("§a已获得 exchanger。§r");
 }
 
-void ExchangePlugin::refreshHolograms()
-{
-    if (!ready_) {
+void ExchangePlugin::refreshHolograms() {
+    if (!ready_ || !hologram_snapshot_state_) {
         return;
     }
     try {
+        auto state = hologram_snapshot_state_;
+        std::optional<std::unordered_map<Id, OrderBook>> snapshot;
+        std::optional<std::string> error;
+        {
+            std::scoped_lock lock(state->mutex);
+            snapshot = std::move(state->ready_snapshot);
+            state->ready_snapshot.reset();
+            error = std::move(state->error);
+            state->error.reset();
+        }
+        if (error) {
+            getLogger().warning("Asynchronous hologram snapshot failed: {}", *error);
+        }
+        if (snapshot) {
+            hologram_books_ = std::move(*snapshot);
+            for (const auto &[id, market] : markets_) {
+                if (const auto book = hologram_books_.find(id); book != hologram_books_.end()) {
+                    refreshHologram(market, book->second);
+                }
+            }
+        }
+
         std::vector<Id> ids;
         ids.reserve(markets_.size());
         for (const auto &[id, market] : markets_) {
             static_cast<void>(market);
             ids.push_back(id);
         }
-        for (const auto id : ids) {
-            if (const auto it = markets_.find(id); it != markets_.end()) {
-                refreshHologram(it->second);
-            }
+        if (ids.empty() || state->query_running.exchange(true)) {
+            return;
         }
-    }
-    catch (const std::exception &error) {
+        const auto database_config = config_.database;
+        const auto initial_balance = config_.market.initial_balance_cents;
+        const auto max_order_quantity = config_.market.max_order_quantity;
+        std::shared_ptr<endstone::Task> task;
+        try {
+            task = getServer().getScheduler().runTaskAsync(
+                *this, [state, ids = std::move(ids), database_config, initial_balance, max_order_quantity] {
+                    try {
+                        Database database(database_config);
+                        database.connect();
+                        ExchangeService service(database, initial_balance, max_order_quantity);
+                        auto books = service.topOfBooks(ids);
+                        if (!state->stopping) {
+                            std::scoped_lock lock(state->mutex);
+                            state->ready_snapshot = std::move(books);
+                        }
+                    } catch (const std::exception &exception) {
+                        if (!state->stopping) {
+                            std::scoped_lock lock(state->mutex);
+                            state->error = exception.what();
+                        }
+                    }
+                    state->query_running = false;
+                });
+        } catch (...) {
+            state->query_running = false;
+            throw;
+        }
+        if (!task) {
+            state->query_running = false;
+            throw std::runtime_error("could not schedule asynchronous hologram snapshot");
+        }
+    } catch (const std::exception &error) {
         getLogger().warning("Hologram refresh failed: {}", error.what());
     }
 }
 
-void ExchangePlugin::refreshHologram(const Market &market)
-{
+void ExchangePlugin::refreshHologram(const Market &market) {
+    if (const auto book = hologram_books_.find(market.id); book != hologram_books_.end()) {
+        refreshHologram(market, book->second);
+    } else {
+        refreshHologram(market, OrderBook{});
+    }
+    refreshHolograms();
+}
+
+void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book) {
     const auto location = targetLocation(market);
     if (!location) {
         return;
@@ -1019,19 +1092,17 @@ void ExchangePlugin::refreshHologram(const Market &market)
             return;
         }
         static_cast<void>(hologram->addScoreboardTag(hologramTag(market.id)));
-        const auto command =
-            std::format("effect @e[tag={},c=1] invisibility infinite 0 true", hologramTag(market.id));
+        const auto command = std::format("effect @e[tag={},c=1] invisibility infinite 0 true", hologramTag(market.id));
         static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(), command));
     }
     hologram_ids_[market.id] = hologram->getId();
     static_cast<void>(hologram->teleport(hologram_location));
-    hologram->setNameTag(hologramText(market, service_->orderBook(market.id, 1)));
+    hologram->setNameTag(hologramText(market, book));
     hologram->setNameTagVisible(true);
     hologram->setNameTagAlwaysVisible(true);
 }
 
-void ExchangePlugin::removeHologram(const Id market_id)
-{
+void ExchangePlugin::removeHologram(const Id market_id) {
     endstone::Actor *actor = nullptr;
     if (const auto it = hologram_ids_.find(market_id); it != hologram_ids_.end()) {
         actor = findActorById(it->second);
@@ -1045,8 +1116,7 @@ void ExchangePlugin::removeHologram(const Id market_id)
     }
 }
 
-void ExchangePlugin::removeAllHolograms()
-{
+void ExchangePlugin::removeAllHolograms() {
     std::vector<Id> ids;
     ids.reserve(hologram_ids_.size());
     for (const auto &[id, actor_id] : hologram_ids_) {
@@ -1058,8 +1128,7 @@ void ExchangePlugin::removeAllHolograms()
     }
 }
 
-endstone::Actor *ExchangePlugin::findActorById(const std::int64_t actor_id) const
-{
+endstone::Actor *ExchangePlugin::findActorById(const std::int64_t actor_id) const {
     const auto *level = getServer().getLevel();
     if (level == nullptr) {
         return nullptr;
@@ -1072,8 +1141,7 @@ endstone::Actor *ExchangePlugin::findActorById(const std::int64_t actor_id) cons
     return nullptr;
 }
 
-endstone::Actor *ExchangePlugin::findActorByTag(const std::string_view tag) const
-{
+endstone::Actor *ExchangePlugin::findActorByTag(const std::string_view tag) const {
     const auto *level = getServer().getLevel();
     if (level == nullptr) {
         return nullptr;
@@ -1086,8 +1154,7 @@ endstone::Actor *ExchangePlugin::findActorByTag(const std::string_view tag) cons
     return nullptr;
 }
 
-std::optional<endstone::Location> ExchangePlugin::targetLocation(const Market &market) const
-{
+std::optional<endstone::Location> ExchangePlugin::targetLocation(const Market &market) const {
     const auto *level = getServer().getLevel();
     if (level == nullptr) {
         return std::nullopt;
@@ -1111,18 +1178,16 @@ std::optional<endstone::Location> ExchangePlugin::targetLocation(const Market &m
     return std::nullopt;
 }
 
-std::string ExchangePlugin::hologramText(const Market &market, const OrderBook &book) const
-{
+std::string ExchangePlugin::hologramText(const Market &market, const OrderBook &book) const {
     const auto bid = book.bids.empty() ? std::string("--") : formatMoney(book.bids.front().price_cents);
     const auto ask = book.asks.empty() ? std::string("--") : formatMoney(book.asks.front().price_cents);
     const auto bid_quantity = book.bids.empty() ? 0 : book.bids.front().quantity;
     const auto ask_quantity = book.asks.empty() ? 0 : book.asks.front().quantity;
-    return std::format("§6{}§r\n§a买一 {} × {}§r\n§c卖一 {} × {}§r\n§e右击交易§r", market.item.name, bid,
-                       bid_quantity, ask, ask_quantity);
+    return std::format("§6{}§r\n§a买一 {} × {}§r\n§c卖一 {} × {}§r\n§e右击交易§r", market.item.name, bid, bid_quantity,
+                       ask, ask_quantity);
 }
 
-std::vector<double> ExchangePlugin::numericFormValues(const std::string_view response)
-{
+std::vector<double> ExchangePlugin::numericFormValues(const std::string_view response) {
     std::vector<double> result;
     bool in_string = false;
     bool escaped = false;
@@ -1131,11 +1196,9 @@ std::vector<double> ExchangePlugin::numericFormValues(const std::string_view res
         if (in_string) {
             if (escaped) {
                 escaped = false;
-            }
-            else if (c == '\\') {
+            } else if (c == '\\') {
                 escaped = true;
-            }
-            else if (c == '"') {
+            } else if (c == '"') {
                 in_string = false;
             }
             ++index;
@@ -1165,31 +1228,26 @@ std::vector<double> ExchangePlugin::numericFormValues(const std::string_view res
     return result;
 }
 
-std::string ExchangePlugin::formatMoney(const Cents cents)
-{
+std::string ExchangePlugin::formatMoney(const Cents cents) {
     return std::format("{:.2f}", static_cast<double>(cents) / 100.0);
 }
 
-std::string ExchangePlugin::targetTag(const Id market_id)
-{
+std::string ExchangePlugin::targetTag(const Id market_id) {
     return std::string(TargetTagPrefix) + std::to_string(market_id);
 }
 
-std::string ExchangePlugin::hologramTag(const Id market_id)
-{
+std::string ExchangePlugin::hologramTag(const Id market_id) {
     return std::string(HologramTagPrefix) + std::to_string(market_id);
 }
 
-bool ExchangePlugin::hasTag(const endstone::Actor &actor, const std::string_view tag)
-{
+bool ExchangePlugin::hasTag(const endstone::Actor &actor, const std::string_view tag) {
     const auto tags = actor.getScoreboardTags();
     return std::find(tags.begin(), tags.end(), tag) != tags.end();
 }
 
-}  // namespace exchange
+} // namespace exchange
 
-ENDSTONE_PLUGIN("exchange", ENDSTONE_EXCHANGE_VERSION, exchange::ExchangePlugin)
-{
+ENDSTONE_PLUGIN("exchange", ENDSTONE_EXCHANGE_VERSION, exchange::ExchangePlugin) {
     prefix = "Exchange";
     description = "Physical-object order-book exchange with MySQL settlement";
     website = "https://github.com/wingxia/endstone-exchange";
