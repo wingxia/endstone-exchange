@@ -1,5 +1,6 @@
 #include "endstone_exchange/database.hpp"
 
+#include <errmsg.h>
 #include <mysql.h>
 
 #include <array>
@@ -9,9 +10,23 @@
 #include <utility>
 
 namespace exchange {
+namespace {
+
+// MySQL 8.0.24+ reports wait_timeout disconnects with this server error
+// instead of the older client-side CR_SERVER_GONE_ERROR in some connectors.
+constexpr unsigned int MySqlClientInteractionTimeout = 4031;
+
+bool isDisconnectError(const unsigned int error_code) {
+    return error_code == CR_SERVER_GONE_ERROR || error_code == CR_SERVER_LOST ||
+           error_code == MySqlClientInteractionTimeout;
+}
+
+} // namespace
 
 struct Database::Impl {
     MYSQL *connection{nullptr};
+    bool in_transaction{false};
+    bool reconnecting{false};
 
     ~Impl() {
         if (connection != nullptr) {
@@ -27,6 +42,9 @@ Database::Database(Database &&) noexcept = default;
 Database &Database::operator=(Database &&) noexcept = default;
 
 void Database::connect() {
+    if (impl_->in_transaction) {
+        throw DatabaseError("cannot reconnect during a database transaction");
+    }
     if (impl_->connection != nullptr) {
         mysql_close(impl_->connection);
         impl_->connection = nullptr;
@@ -37,6 +55,7 @@ void Database::connect() {
         throw DatabaseError("mysql_init failed");
     }
     impl_->connection = connection;
+    impl_->in_transaction = false;
     mysql_options(connection, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout_seconds);
     mysql_options(connection, MYSQL_OPT_READ_TIMEOUT, &config_.connect_timeout_seconds);
     mysql_options(connection, MYSQL_OPT_WRITE_TIMEOUT, &config_.connect_timeout_seconds);
@@ -269,14 +288,43 @@ void Database::migrate() {
 void Database::ping() {
     ensureConnected();
     if (mysql_ping(impl_->connection) != 0) {
-        throw DatabaseError("database ping failed: " + std::string(mysql_error(impl_->connection)));
+        const auto error_code = mysql_errno(impl_->connection);
+        const auto message = std::string(mysql_error(impl_->connection));
+        if (!impl_->in_transaction && !impl_->reconnecting && isDisconnectError(error_code)) {
+            impl_->reconnecting = true;
+            try {
+                connect();
+                impl_->reconnecting = false;
+                return;
+            } catch (...) {
+                impl_->reconnecting = false;
+                throw;
+            }
+        }
+        throw DatabaseError("database ping failed: " + message);
     }
 }
 
 void Database::execute(const std::string_view sql) {
     ensureConnected();
     if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
-        throw DatabaseError("database statement failed: " + std::string(mysql_error(impl_->connection)));
+        const auto error_code = mysql_errno(impl_->connection);
+        if (!impl_->in_transaction && !impl_->reconnecting && isDisconnectError(error_code)) {
+            impl_->reconnecting = true;
+            try {
+                connect();
+                impl_->reconnecting = false;
+            } catch (...) {
+                impl_->reconnecting = false;
+                throw;
+            }
+            if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
+                throw DatabaseError("database statement failed after reconnect: " +
+                                    std::string(mysql_error(impl_->connection)));
+            }
+        } else {
+            throw DatabaseError("database statement failed: " + std::string(mysql_error(impl_->connection)));
+        }
     }
     if (MYSQL_RES *result = mysql_store_result(impl_->connection); result != nullptr) {
         mysql_free_result(result);
@@ -288,7 +336,23 @@ void Database::execute(const std::string_view sql) {
 QueryRows Database::query(const std::string_view sql) {
     ensureConnected();
     if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
-        throw DatabaseError("database query failed: " + std::string(mysql_error(impl_->connection)));
+        const auto error_code = mysql_errno(impl_->connection);
+        if (!impl_->in_transaction && !impl_->reconnecting && isDisconnectError(error_code)) {
+            impl_->reconnecting = true;
+            try {
+                connect();
+                impl_->reconnecting = false;
+            } catch (...) {
+                impl_->reconnecting = false;
+                throw;
+            }
+            if (mysql_real_query(impl_->connection, sql.data(), static_cast<unsigned long>(sql.size())) != 0) {
+                throw DatabaseError("database query failed after reconnect: " +
+                                    std::string(mysql_error(impl_->connection)));
+            }
+        } else {
+            throw DatabaseError("database query failed: " + std::string(mysql_error(impl_->connection)));
+        }
     }
     MYSQL_RES *result = mysql_store_result(impl_->connection);
     if (result == nullptr) {
@@ -332,16 +396,22 @@ std::uint64_t Database::affectedRows() const {
 }
 
 void Database::begin() {
+    if (impl_->in_transaction) {
+        throw DatabaseError("database transaction is already active");
+    }
     execute("START TRANSACTION");
+    impl_->in_transaction = true;
 }
 
 void Database::commit() {
     execute("COMMIT");
+    impl_->in_transaction = false;
 }
 
 void Database::rollback() noexcept {
     if (impl_ != nullptr && impl_->connection != nullptr) {
         mysql_rollback(impl_->connection);
+        impl_->in_transaction = false;
     }
 }
 

@@ -5,6 +5,7 @@
 #include "endstone_exchange/price_window.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -243,6 +245,13 @@ void testDatabaseIntegration() {
     database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
     require(exchange::cellInt(schema_version.front(), 0) == 5, "database migrations must be idempotent at version 5");
+    database.execute("SET SESSION wait_timeout=1");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    database.ping();
+    require(!database.query("SELECT 1").empty(), "stale idle connection must reconnect outside a transaction");
+    database.execute("SET SESSION wait_timeout=1");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    require(!database.query("SELECT 1").empty(), "first query after idle timeout must reconnect and retry once");
     truncateExchangeTables(database);
     exchange::ExchangeService service(database, 100'000, 2304);
 
