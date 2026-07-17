@@ -504,6 +504,56 @@ void testDatabaseIntegration() {
     require(self_buy.filled_quantity == 0, "self-trade exclusion leaves the player's own ask untouched");
     service.cancelOrder(self_ask.order_id, Bob);
 
+    auto crossed_spread_market = replacement;
+    crossed_spread_market.id = 0;
+    crossed_spread_market.target_key = "block|overworld|1|64|0";
+    crossed_spread_market.block_x = 1;
+    crossed_spread_market = service.activateMarket(crossed_spread_market);
+    const auto buyer_balance_before_cross = service.balance(Alice);
+    const auto seller_balance_before_cross = service.balance(Bob);
+    const auto resting_bid = service.placeOrder(
+        {crossed_spread_market.id, std::string(Alice), "Alice", exchange::Side::Buy,
+         exchange::OrderType::Limit, 1'000, 5});
+    require(resting_bid.filled_quantity == 0 && resting_bid.open_quantity == 5 &&
+                service.balance(Alice) == buyer_balance_before_cross - 5'000,
+            "five-unit resting bid at 10.00 reserves exactly 50.00");
+
+    const auto crossing_ask = service.placeOrder(
+        {crossed_spread_market.id, std::string(Bob), "Bob", exchange::Side::Sell,
+         exchange::OrderType::Limit, 900, 3});
+    require(crossing_ask.filled_quantity == 3 && crossing_ask.open_quantity == 0 &&
+                crossing_ask.gross_cents == 3'000,
+            "three-unit ask at 9.00 crosses the resting 10.00 bid at the maker price");
+    require(service.balance(Alice) == buyer_balance_before_cross - 5'000 &&
+                service.balance(Bob) == seller_balance_before_cross + 3'000,
+            "crossed-spread settlement debits the existing reserve and credits 30.00 to the seller");
+
+    const auto crossed_orders = database.query(std::format(
+        "SELECT id,price_cents,original_qty,remaining_qty,reserved_cents,status FROM exchange_orders "
+        "WHERE id IN ({},{}) ORDER BY id",
+        resting_bid.order_id, crossing_ask.order_id));
+    require(crossed_orders.size() == 2 && exchange::cellInt64(crossed_orders[0], 1) == 1'000 &&
+                exchange::cellInt(crossed_orders[0], 2) == 5 && exchange::cellInt(crossed_orders[0], 3) == 2 &&
+                exchange::cellInt64(crossed_orders[0], 4) == 2'000 &&
+                exchange::cellString(crossed_orders[0], 5) == "PARTIAL" &&
+                exchange::cellInt64(crossed_orders[1], 1) == 900 && exchange::cellInt(crossed_orders[1], 2) == 3 &&
+                exchange::cellInt(crossed_orders[1], 3) == 0 &&
+                exchange::cellString(crossed_orders[1], 5) == "FILLED",
+            "crossed-spread orders retain the correct prices, remaining quantity, reserve and status");
+    const auto crossed_trade = database.query(std::format(
+        "SELECT price_cents,quantity FROM exchange_trades WHERE buy_order_id={} AND sell_order_id={}",
+        resting_bid.order_id, crossing_ask.order_id));
+    require(crossed_trade.size() == 1 && exchange::cellInt64(crossed_trade.front(), 0) == 1'000 &&
+                exchange::cellInt(crossed_trade.front(), 1) == 3,
+            "crossed-spread trade record uses the resting bid's 10.00 maker price");
+    book = service.orderBook(crossed_spread_market.id, 5);
+    require(book.bids.size() == 1 && book.bids.front().price_cents == 1'000 &&
+                book.bids.front().quantity == 2 && book.asks.empty() && book.last_price_cents == 1'000,
+            "crossed-spread order book keeps only the remaining two-unit 10.00 bid");
+    service.cancelOrder(resting_bid.order_id, Alice);
+    require(service.balance(Alice) == buyer_balance_before_cross - 3'000,
+            "canceling the two-unit remainder refunds exactly the remaining 20.00 reserve");
+
     const auto excess_escrow = service.prepareSellEscrow(
         {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 250, 1});
     service.markSellEscrowTagged(excess_escrow.id, 2, 1);
