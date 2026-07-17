@@ -57,7 +57,7 @@ class ExchangePlugin : public endstone::Plugin {
     void toggleBlock(endstone::Player &player, endstone::Block &block);
     void queueItemFrameToggle(endstone::Player &player, endstone::Block &block);
     void toggleActor(endstone::Player &player, endstone::Actor &actor);
-    void deactivate(endstone::Player *player, Id market_id, std::string_view reason);
+    void deactivate(endstone::Player *player, Id market_id, std::string_view reason, bool preserve_orders);
     void indexMarket(const Market &market);
     void unindexMarket(Id market_id);
     void restoreMarkets();

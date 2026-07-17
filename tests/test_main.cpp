@@ -243,8 +243,16 @@ void testDatabaseIntegration() {
     database.connect();
     database.migrate();
     database.migrate();
+    database.execute("DELETE FROM exchange_schema_versions WHERE version=6");
+    database.execute("ALTER TABLE exchange_markets DROP COLUMN reopenable");
+    database.migrate();
+    const auto reopenable_column = database.query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+        "AND TABLE_NAME='exchange_markets' AND COLUMN_NAME='reopenable'");
+    require(reopenable_column.size() == 1, "version 5 upgrade must add the reopenable market column");
+    database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
-    require(exchange::cellInt(schema_version.front(), 0) == 5, "database migrations must be idempotent at version 5");
+    require(exchange::cellInt(schema_version.front(), 0) == 6, "database migrations must be idempotent at version 6");
     database.execute("SET SESSION wait_timeout=1");
     std::this_thread::sleep_for(std::chrono::seconds(2));
     database.ping();
@@ -257,8 +265,10 @@ void testDatabaseIntegration() {
 
     constexpr std::string_view Alice = "00000000-0000-0000-0000-000000000001";
     constexpr std::string_view Bob = "00000000-0000-0000-0000-000000000002";
+    constexpr std::string_view Charlie = "00000000-0000-0000-0000-000000000003";
     service.ensureAccount(Alice, "Alice");
     service.ensureAccount(Bob, "Bob");
+    service.ensureAccount(Charlie, "Charlie");
 
     endstone::CompoundTag nbt;
     nbt.insert_or_assign("custom", endstone::StringTag("preserved"));
@@ -355,8 +365,92 @@ void testDatabaseIntegration() {
 
     book = service.orderBook(market.id, 5);
     require(book.last_price_cents == 90, "last trade price");
-    service.deactivateMarket(market.id);
-    require(!service.findMarketByTarget(market.target_key).has_value(), "deactivated target lookup");
+
+    const auto before_pause_alice = service.balance(Alice);
+    const auto before_pause_bob = service.balance(Bob);
+    const auto paused_bid = service.placeOrder(
+        {market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Limit, 80, 5});
+    const auto paused_ask = service.placeOrder(
+        {market.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 120, 4});
+    require(paused_bid.open_quantity == 5 && paused_ask.open_quantity == 4, "two-sided resting book before close");
+    require(service.balance(Alice) == before_pause_alice - 400 && service.balance(Bob) == before_pause_bob,
+            "resting order funding before close");
+
+    service.closeMarket(market.id);
+    service.closeMarket(market.id);
+    require(!service.findMarketByTarget(market.target_key).has_value(), "closed target lookup");
+    const auto paused_market = service.findMarket(market.id);
+    require(paused_market.has_value() && !paused_market->active, "closed market is inactive");
+    const auto paused_state = database.query(
+        std::format("SELECT active,reopenable FROM exchange_markets WHERE id={}", market.id));
+    require(exchange::cellInt(paused_state.front(), 0) == 0 && exchange::cellInt(paused_state.front(), 1) == 1,
+            "manual close marks market reopenable");
+    book = service.orderBook(market.id, 5);
+    require(book.bids.size() == 1 && book.bids.front().price_cents == 80 && book.bids.front().quantity == 5 &&
+                book.asks.size() == 1 && book.asks.front().price_cents == 120 && book.asks.front().quantity == 4,
+            "manual close preserves the funded order book");
+    require(service.balance(Alice) == before_pause_alice - 400 && service.balance(Bob) == before_pause_bob,
+            "manual close does not refund or re-deliver escrow");
+    const auto paused_orders = service.openOrders(Alice);
+    require(std::any_of(paused_orders.begin(), paused_orders.end(),
+                        [&](const exchange::OpenOrder &order) { return order.id == paused_bid.order_id; }),
+            "closed-market orders remain individually cancelable");
+
+    bool closed_order_rejected = false;
+    try {
+        static_cast<void>(service.placeOrder(
+            {market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Market, 0, 1}));
+    } catch (const std::exception &) {
+        closed_order_rejected = true;
+    }
+    require(closed_order_rejected, "closed market must reject new orders");
+
+    auto changed_item = market;
+    changed_item.id = 0;
+    changed_item.item = {"minecraft:emerald", 0, {}, "Emerald"};
+    changed_item.active = true;
+    changed_item = service.activateMarket(changed_item);
+    require(changed_item.id != market.id && service.orderBook(changed_item.id, 5).bids.empty() &&
+                service.orderBook(changed_item.id, 5).asks.empty(),
+            "a changed item creates an isolated market generation without inheriting old orders");
+    service.closeMarket(changed_item.id);
+
+    auto resumed = market;
+    resumed.id = 0;
+    resumed.active = true;
+    resumed = service.activateMarket(resumed);
+    require(resumed.id == market.id, "reopening the same item must resume the original market generation");
+    book = service.orderBook(resumed.id, 5);
+    require(book.bids.front().quantity == 5 && book.asks.front().quantity == 4,
+            "resumed market exposes the preserved book");
+
+    const auto negotiated_sell = service.placeOrder(
+        {resumed.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 70, 2});
+    require(negotiated_sell.filled_quantity == 2 && negotiated_sell.gross_cents == 160,
+            "crossing seller accepts the resting bid price");
+    const auto negotiated_buy = service.placeOrder(
+        {resumed.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Limit, 130, 3});
+    require(negotiated_buy.filled_quantity == 3 && negotiated_buy.gross_cents == 360,
+            "crossing buyer accepts the resting ask price");
+    require(service.balance(Alice) == before_pause_alice - 760 && service.balance(Bob) == before_pause_bob + 520,
+            "negotiated fills settle exact maker prices");
+    book = service.orderBook(resumed.id, 5);
+    require(book.bids.front().quantity == 3 && book.asks.front().quantity == 1 && book.last_price_cents == 120,
+            "both sides retain correct partial quantities");
+
+    service.closeMarket(resumed.id);
+    const auto balance_before_second_resume = service.balance(Alice);
+    resumed = service.activateMarket(resumed);
+    require(resumed.id == market.id && service.balance(Alice) == balance_before_second_resume,
+            "repeat close and resume is lossless");
+    service.retireMarket(resumed.id);
+    require(service.openOrders(Alice).empty(), "retirement cancels the remaining buy order");
+    require(service.balance(Alice) == before_pause_alice - 520,
+            "retirement refunds only the unfilled buy-order reserve");
+    const auto retired_state = database.query(
+        std::format("SELECT active,reopenable FROM exchange_markets WHERE id={}", market.id));
+    require(exchange::cellInt(retired_state.front(), 0) == 0 && exchange::cellInt(retired_state.front(), 1) == 0,
+            "retired market cannot be resumed");
 
     auto replacement = market;
     replacement.id = 0;
@@ -383,6 +477,32 @@ void testDatabaseIntegration() {
         duplicate_activation_rejected = true;
     }
     require(duplicate_activation_rejected, "an active target must not get a second market binding");
+
+    const auto first_same_price_bid = service.placeOrder(
+        {replacement.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Limit, 100, 1});
+    const auto second_same_price_bid = service.placeOrder(
+        {replacement.id, std::string(Charlie), "Charlie", exchange::Side::Buy, exchange::OrderType::Limit, 100, 1});
+    static_cast<void>(first_same_price_bid);
+    static_cast<void>(second_same_price_bid);
+    const auto first_time_fill = service.placeOrder(
+        {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Market, 0, 1});
+    require(first_time_fill.filled_quantity == 1, "first same-price bid fills");
+    auto latest_trade = database.query(std::format(
+        "SELECT buyer_uuid FROM exchange_trades WHERE market_id={} ORDER BY id DESC LIMIT 1", replacement.id));
+    require(exchange::cellString(latest_trade.front(), 0) == Alice, "same-price orders use time priority");
+    const auto second_time_fill = service.placeOrder(
+        {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Market, 0, 1});
+    require(second_time_fill.filled_quantity == 1, "second same-price bid fills next");
+    latest_trade = database.query(std::format(
+        "SELECT buyer_uuid FROM exchange_trades WHERE market_id={} ORDER BY id DESC LIMIT 1", replacement.id));
+    require(exchange::cellString(latest_trade.front(), 0) == Charlie, "time priority advances to the second bid");
+
+    const auto self_ask = service.placeOrder(
+        {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 150, 1});
+    const auto self_buy = service.placeOrder(
+        {replacement.id, std::string(Bob), "Bob", exchange::Side::Buy, exchange::OrderType::Market, 0, 1});
+    require(self_buy.filled_quantity == 0, "self-trade exclusion leaves the player's own ask untouched");
+    service.cancelOrder(self_ask.order_id, Bob);
 
     const auto excess_escrow = service.prepareSellEscrow(
         {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 250, 1});
@@ -413,6 +533,21 @@ void testDatabaseIntegration() {
     const auto ledger_reasons = database.query("SELECT COUNT(DISTINCT reason) FROM exchange_balance_ledger");
     require(exchange::cellInt(ledger_reasons.front(), 0) >= 4,
             "balance ledger must retain distinct operational reasons");
+    const auto money_total = database.query(
+        "SELECT (SELECT COALESCE(SUM(balance_cents),0) FROM exchange_accounts)+"
+        "(SELECT COALESCE(SUM(reserved_cents),0) FROM exchange_orders WHERE status IN ('OPEN','PARTIAL'))");
+    require(exchange::cellInt64(money_total.front(), 0) == 300'000,
+            "account balances plus funded buy reserves must conserve all exchange money");
+    const auto order_invariant_failures = database.query(
+        "SELECT id FROM exchange_orders WHERE "
+        "(side='BUY' AND status IN ('OPEN','PARTIAL') AND reserved_cents<>price_cents*remaining_qty) OR "
+        "(status IN ('FILLED','CANCELED') AND (remaining_qty<>0 OR reserved_cents<>0))");
+    require(order_invariant_failures.empty(), "order quantities and buy reserves must remain internally consistent");
+    const auto market_invariant_failures = database.query(
+        "SELECT m.id FROM exchange_markets m LEFT JOIN exchange_target_bindings b ON b.market_id=m.id WHERE "
+        "(m.active=1 AND (m.reopenable=1 OR b.market_id IS NULL)) OR "
+        "(m.active=0 AND b.market_id IS NOT NULL)");
+    require(market_invariant_failures.empty(), "active, reopenable and target-binding market states must agree");
 }
 
 } // namespace

@@ -332,7 +332,7 @@ void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
     }
     const auto key = blockTargetKey(event.getBlock());
     if (const auto it = target_index_.find(key); it != target_index_.end()) {
-        deactivate(&event.getPlayer(), it->second, "目标方块被破坏");
+        deactivate(&event.getPlayer(), it->second, "目标方块被破坏", false);
     }
 }
 
@@ -367,7 +367,7 @@ void ExchangePlugin::onActorRemove(endstone::ActorRemoveEvent &event) {
     }
     for (const auto &[market_id, market] : markets_) {
         if (market.target_kind == TargetKind::Actor && hasTag(actor, targetTag(market_id))) {
-            deactivate(nullptr, market_id, "目标实体已移除");
+            deactivate(nullptr, market_id, "目标实体已移除", false);
             return;
         }
     }
@@ -477,7 +477,7 @@ void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &bloc
     }
     const auto key = blockTargetKey(block);
     if (const auto it = target_index_.find(key); it != target_index_.end()) {
-        deactivate(&player, it->second, "管理员取消");
+        deactivate(&player, it->second, "管理员关闭", true);
         return;
     }
     if (isItemFrameBlock(block.getType())) {
@@ -628,7 +628,7 @@ void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &acto
         return;
     }
     if (const auto market_id = marketIdForActor(actor)) {
-        deactivate(&player, *market_id, "管理员取消");
+        deactivate(&player, *market_id, "管理员关闭", true);
         return;
     }
     try {
@@ -655,7 +655,8 @@ void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &acto
     }
 }
 
-void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, const std::string_view reason) {
+void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, const std::string_view reason,
+                                const bool preserve_orders) {
     try {
         const auto it = markets_.find(market_id);
         if (it == markets_.end()) {
@@ -666,13 +667,21 @@ void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, co
                 static_cast<void>(target->removeScoreboardTag(targetTag(market_id)));
             }
         }
-        service_->deactivateMarket(market_id);
+        if (preserve_orders) {
+            service_->closeMarket(market_id);
+        } else {
+            service_->retireMarket(market_id);
+        }
         removeHologram(market_id);
         unindexMarket(market_id);
         if (player != nullptr) {
-            player->sendMessage("§e已取消可交易状态；所有挂单已撤销并退款/退物。§r");
+            if (preserve_orders) {
+                player->sendMessage("§e市场已关闭；现有挂单和托管保持不变，重新开放同一物品后继续撮合。§r");
+            } else {
+                player->sendMessage("§e市场已退市；所有挂单已撤销并退款/退物。§r");
+            }
         }
-        getLogger().info("Market {} deactivated: {}", market_id, reason);
+        getLogger().info("Market {} deactivated: {} (orders_preserved={})", market_id, reason, preserve_orders);
     } catch (const std::exception &error) {
         if (player != nullptr) {
             player->sendErrorMessage("取消市场失败：{}", error.what());

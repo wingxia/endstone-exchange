@@ -16,7 +16,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 
 ## Durable identities and invariants
 
-- `exchange_markets` is immutable. Reopening the same block or actor creates a new market generation.
+- `exchange_markets` keeps immutable item snapshots. A manual close marks a generation reopenable; reopening the same target with the exact item identity resumes its order book, while a different item creates a new generation.
 - `exchange_target_bindings` is the only mutable pointer from a world target to its active generation.
 - Orders, trades and deliveries always reference an immutable market item snapshot.
 - `exchange_delivery_claims` reserves a delivery before a claim marker enters the inventory. Reconnect either applies the tagged quantity or releases the reservation.
@@ -33,6 +33,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 | 3 | Two-phase, idempotent delivery claims |
 | 4 | Crash-recoverable sell inventory escrow |
 | 5 | Immutable balance ledger and opening-balance backfill |
+| 6 | Paused markets whose funded order books survive a manual close and resume safely |
 
 The embedded runner checks `exchange_schema_versions` and makes each upgrade retry-safe. Files under `migrations/` are the reviewable SQL equivalents; the plugin remains self-contained at deployment time.
 

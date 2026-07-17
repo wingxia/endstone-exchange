@@ -115,6 +115,26 @@ Market ExchangeService::activateMarket(const Market &market) {
     if (!existing.empty()) {
         throw std::runtime_error("target already has an active market");
     }
+
+    const auto resumable = database_.query(std::format(
+        "SELECT id FROM exchange_markets WHERE target_key={} AND target_kind={} AND active=0 AND reopenable=1 "
+        "AND item_type={} AND item_data={} AND item_nbt={} ORDER BY id DESC LIMIT 1 FOR UPDATE",
+        database_.quote(market.target_key), database_.quote(toSql(market.target_kind)),
+        database_.quote(market.item.type), market.item.data, Database::hexLiteral(market.item.nbt)));
+    if (!resumable.empty()) {
+        const auto id = static_cast<Id>(cellInt64(resumable.front(), 0));
+        database_.execute(
+            std::format("UPDATE exchange_markets SET active=1,reopenable=0 WHERE id={}", id));
+        database_.execute(std::format("INSERT INTO exchange_target_bindings(target_key,market_id) VALUES ({},{})",
+                                      database_.quote(market.target_key), id));
+        transaction.commit();
+        const auto activated = findMarket(id);
+        if (!activated) {
+            throw std::runtime_error("resumed market could not be reloaded");
+        }
+        return *activated;
+    }
+
     const auto block_x = market.block_x ? std::to_string(*market.block_x) : "NULL";
     const auto block_y = market.block_y ? std::to_string(*market.block_y) : "NULL";
     const auto block_z = market.block_z ? std::to_string(*market.block_z) : "NULL";
@@ -137,7 +157,7 @@ Market ExchangeService::activateMarket(const Market &market) {
     return *activated;
 }
 
-void ExchangeService::deactivateMarket(const Id market_id) {
+void ExchangeService::closeMarket(const Id market_id) {
     Transaction transaction(database_);
     const auto market = database_.query(
         std::format("SELECT active,target_key FROM exchange_markets WHERE id={} FOR UPDATE", market_id));
@@ -148,6 +168,24 @@ void ExchangeService::deactivateMarket(const Id market_id) {
         database_.execute(std::format("DELETE FROM exchange_target_bindings WHERE market_id={}", market_id));
         transaction.commit();
         return;
+    }
+
+    database_.execute(std::format("DELETE FROM exchange_target_bindings WHERE target_key={} AND market_id={}",
+                                  database_.quote(cellString(market.front(), 1)), market_id));
+    if (database_.affectedRows() != 1) {
+        throw std::runtime_error("active market target binding is missing");
+    }
+    database_.execute(
+        std::format("UPDATE exchange_markets SET active=0,reopenable=1 WHERE id={}", market_id));
+    transaction.commit();
+}
+
+void ExchangeService::retireMarket(const Id market_id) {
+    Transaction transaction(database_);
+    const auto market = database_.query(
+        std::format("SELECT active,target_key FROM exchange_markets WHERE id={} FOR UPDATE", market_id));
+    if (market.empty()) {
+        throw std::runtime_error("market does not exist");
     }
 
     const auto orders = database_.query(
@@ -170,10 +208,11 @@ void ExchangeService::deactivateMarket(const Id market_id) {
     }
     database_.execute(std::format("DELETE FROM exchange_target_bindings WHERE target_key={} AND market_id={}",
                                   database_.quote(cellString(market.front(), 1)), market_id));
-    if (database_.affectedRows() != 1) {
+    if (cellInt(market.front(), 0) != 0 && database_.affectedRows() != 1) {
         throw std::runtime_error("active market target binding is missing");
     }
-    database_.execute(std::format("UPDATE exchange_markets SET active=0 WHERE id={}", market_id));
+    database_.execute(
+        std::format("UPDATE exchange_markets SET active=0,reopenable=0 WHERE id={}", market_id));
     transaction.commit();
 }
 

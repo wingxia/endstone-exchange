@@ -19,7 +19,8 @@ class ExchangeService {
     Cents addBalance(std::string_view player_uuid, std::string_view player_name, Cents delta_cents);
 
     [[nodiscard]] Market activateMarket(const Market &market);
-    void deactivateMarket(Id market_id);
+    void closeMarket(Id market_id);
+    void retireMarket(Id market_id);
     [[nodiscard]] std::optional<Market> findMarketByTarget(std::string_view target_key);
     [[nodiscard]] std::optional<Market> findMarket(Id market_id);
     [[nodiscard]] std::vector<Market> activeMarkets();

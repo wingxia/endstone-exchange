@@ -263,26 +263,37 @@ void Database::migrate() {
     }
 
     const auto version_5_applied = query("SELECT version FROM exchange_schema_versions WHERE version=5");
-    if (!version_5_applied.empty()) {
+    if (version_5_applied.empty()) {
+        execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_balance_ledger (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            player_uuid CHAR(36) NOT NULL,
+            delta_cents BIGINT NOT NULL,
+            reason VARCHAR(48) NOT NULL,
+            reference_type VARCHAR(24) NULL,
+            reference_id BIGINT UNSIGNED NULL,
+            created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+            INDEX idx_exchange_balance_ledger_player (player_uuid,id),
+            INDEX idx_exchange_balance_ledger_reference (reference_type,reference_id),
+            CONSTRAINT fk_exchange_balance_ledger_account
+                FOREIGN KEY (player_uuid) REFERENCES exchange_accounts(player_uuid)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+        execute(R"sql(INSERT INTO exchange_balance_ledger(player_uuid,delta_cents,reason)
+            SELECT a.player_uuid,a.balance_cents,'MIGRATION_OPENING_BALANCE' FROM exchange_accounts a
+            WHERE NOT EXISTS (SELECT 1 FROM exchange_balance_ledger l WHERE l.player_uuid=a.player_uuid))sql");
+        execute("INSERT INTO exchange_schema_versions(version) VALUES (5)");
+    }
+
+    const auto version_6_applied = query("SELECT version FROM exchange_schema_versions WHERE version=6");
+    if (!version_6_applied.empty()) {
         return;
     }
-    execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_balance_ledger (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        player_uuid CHAR(36) NOT NULL,
-        delta_cents BIGINT NOT NULL,
-        reason VARCHAR(48) NOT NULL,
-        reference_type VARCHAR(24) NULL,
-        reference_id BIGINT UNSIGNED NULL,
-        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-        INDEX idx_exchange_balance_ledger_player (player_uuid,id),
-        INDEX idx_exchange_balance_ledger_reference (reference_type,reference_id),
-        CONSTRAINT fk_exchange_balance_ledger_account
-            FOREIGN KEY (player_uuid) REFERENCES exchange_accounts(player_uuid)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
-    execute(R"sql(INSERT INTO exchange_balance_ledger(player_uuid,delta_cents,reason)
-        SELECT a.player_uuid,a.balance_cents,'MIGRATION_OPENING_BALANCE' FROM exchange_accounts a
-        WHERE NOT EXISTS (SELECT 1 FROM exchange_balance_ledger l WHERE l.player_uuid=a.player_uuid))sql");
-    execute("INSERT INTO exchange_schema_versions(version) VALUES (5)");
+    const auto reopenable_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
+          AND COLUMN_NAME='reopenable' LIMIT 1)sql");
+    if (reopenable_column.empty()) {
+        execute("ALTER TABLE exchange_markets ADD COLUMN reopenable BOOLEAN NOT NULL DEFAULT FALSE AFTER active");
+    }
+    execute("INSERT INTO exchange_schema_versions(version) VALUES (6)");
 }
 
 void Database::ping() {
