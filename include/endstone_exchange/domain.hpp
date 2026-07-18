@@ -25,6 +25,7 @@ struct ItemPrototype {
 
 struct Market {
     Id id{0};
+    Id book_id{0};
     std::string target_key;
     TargetKind target_kind{TargetKind::Block};
     std::string dimension_name;

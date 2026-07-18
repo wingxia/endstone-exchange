@@ -7,7 +7,7 @@ This implementation is pinned to the latest verified stable release, Endstone v0
 | Right-click a block | `PlayerInteractEvent` and `Action::RightClickBlock` | Public API |
 | Right-click an actor | `PlayerInteractActorEvent` | Public API |
 | Detect a stick named `exchanger` | `ItemStack`, `ItemType`, and `ItemMeta::getDisplayName()` | Public API |
-| Read/write player inventory | `PlayerInventory`, `Inventory::containsAtLeast`, `removeItem`, `addItem` | Public API |
+| Read/write player inventory | `PlayerInventory`, slot access, offhand access and `addItem` | Public API; exact identity is compared from type, data value and NBT instead of runtime `ItemMeta::isSimilar` state |
 | Preserve custom item data | `ItemStack::getNbt()` / `setNbt()` | Public API plus a deterministic plugin-side codec for SQL storage |
 | Trading UI | `ModalForm`, `Header`, `Label`, `Divider`, `Dropdown`, and `Slider` | Public API |
 | Floating order-book text | `Dimension::spawnActor`, `Actor::setNameTag*`, scheduler | Invisible, protected armor-stand hologram |

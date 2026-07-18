@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.2.0 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,6 +37,8 @@ set(EXCHANGE_CORE_SOURCES
     src/config.cpp
     src/database.cpp
     src/exchange_service.cpp
+    src/interaction_gate.cpp
+    src/item_identity.cpp
     src/price_window.cpp
 )
 

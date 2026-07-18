@@ -156,6 +156,8 @@ void ExchangePlugin::onDisable() {
     markets_.clear();
     target_index_.clear();
     hologram_books_.clear();
+    interaction_gate_.clear();
+    open_trade_forms_.clear();
     hologram_snapshot_state_.reset();
     getLogger().info("Endstone Exchange disabled.");
 }
@@ -287,15 +289,22 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
         return;
     }
     const auto key = blockTargetKey(block);
-    if (isExchanger(event.getItem())) {
+    const bool exchanger = isExchanger(event.getItem());
+    const auto market = target_index_.find(key);
+    if (!exchanger && market == target_index_.end()) {
+        return;
+    }
+    if (!acceptInteraction(player)) {
+        event.cancel();
+        return;
+    }
+    if (exchanger) {
         event.cancel();
         toggleBlock(player, block);
         return;
     }
-    if (const auto it = target_index_.find(key); it != target_index_.end()) {
-        event.cancel();
-        openTradeForm(player, it->second);
-    }
+    event.cancel();
+    openTradeForm(player, market->second);
 }
 
 void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &event) {
@@ -310,9 +319,17 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
         player.sendErrorMessage("该物品正在由交易所恢复，暂时不能使用。");
         return;
     }
-    if (isExchanger(held)) {
+    const bool exchanger = isExchanger(held);
+    const auto market_id = marketIdForActor(actor);
+    if (!exchanger && !market_id) {
+        return;
+    }
+    if (!acceptInteraction(player)) {
         event.cancel();
-        const auto market_id = marketIdForActor(actor);
+        return;
+    }
+    if (exchanger) {
+        event.cancel();
         if (market_id && hasTag(actor, hologramTag(*market_id))) {
             player.sendErrorMessage("盘口浮字不是可交易目标。");
             return;
@@ -320,10 +337,8 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
         toggleActor(player, actor);
         return;
     }
-    if (const auto market_id = marketIdForActor(actor)) {
-        event.cancel();
-        openTradeForm(player, *market_id);
-    }
+    event.cancel();
+    openTradeForm(player, *market_id);
 }
 
 void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
@@ -379,6 +394,7 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
     }
     try {
         auto &player = event.getPlayer();
+        open_trade_forms_.erase(player.getUniqueId().str());
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
         claimDeliveries(player);
     } catch (const std::exception &error) {
@@ -462,12 +478,8 @@ std::optional<ItemPrototype> ExchangePlugin::prototypeForActor(endstone::Actor &
     return std::nullopt;
 }
 
-endstone::ItemStack ExchangePlugin::makeItemStack(const ItemPrototype &prototype, const int amount) const {
-    endstone::ItemStack item(endstone::ItemTypeId(prototype.type), amount, prototype.data);
-    if (!prototype.nbt.empty()) {
-        item.setNbt(NbtCodec::decode(prototype.nbt));
-    }
-    return item;
+bool ExchangePlugin::acceptInteraction(const endstone::Player &player) {
+    return interaction_gate_.accept(player.getUniqueId().str());
 }
 
 void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &block) {
@@ -729,9 +741,14 @@ void ExchangePlugin::restoreMarkets() {
 }
 
 void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id) {
+    const auto player_uuid = player.getUniqueId().str();
+    if (!open_trade_forms_.insert(player_uuid).second) {
+        return;
+    }
     try {
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
+            open_trade_forms_.erase(player_uuid);
             player.sendErrorMessage("该市场已经关闭。");
             return;
         }
@@ -782,13 +799,18 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
             .addControl(endstone::Slider(price_label, 0.0F, static_cast<float>(price_window.max_index), 1.0F,
                                          static_cast<float>(price_window.default_index)))
             .setSubmitButton("提交交易")
-            .setOnSubmit([this, market_id, price_window](endstone::Player *form_player, std::string response) {
+            .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); })
+            .setOnSubmit([this, market_id, price_window, player_uuid](endstone::Player *form_player,
+                                                                     std::string response) {
+                open_trade_forms_.erase(player_uuid);
                 if (form_player != nullptr && ready_) {
+                    form_player->closeForm();
                     submitTradeForm(*form_player, market_id, price_window, response);
                 }
             });
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
+        open_trade_forms_.erase(player_uuid);
         player.sendErrorMessage("打开交易界面失败：{}", error.what());
         getLogger().warning("Open form failed: {}", error.what());
     }
@@ -847,11 +869,6 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
 
 ExecutionResult ExchangePlugin::submitSellEscrow(endstone::Player &player, const OrderRequest &request) {
     auto &inventory = player.getInventory();
-    const auto sample = makeItemStack(markets_.at(request.market_id).item, 1);
-    if (!inventory.containsAtLeast(sample, request.quantity)) {
-        throw std::runtime_error("背包中没有足够的对应物品（物品 NBT 必须一致）");
-    }
-
     const auto escrow = service_->prepareSellEscrow(request);
     try {
         const auto tagged = tagSellItems(inventory, escrow.item, escrow.requested_quantity, escrow.id);
@@ -1211,7 +1228,8 @@ std::optional<endstone::Location> ExchangePlugin::targetLocation(const Market &m
             return std::nullopt;
         }
         return endstone::Location(*dimension, static_cast<float>(*market.block_x) + 0.5F,
-                                  static_cast<float>(*market.block_y), static_cast<float>(*market.block_z) + 0.5F);
+                                  static_cast<float>(*market.block_y) + 1.0F,
+                                  static_cast<float>(*market.block_z) + 0.5F);
     }
     if (auto *actor = findActorByTag(targetTag(market.id)); actor != nullptr) {
         return actor->getLocation();

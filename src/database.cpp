@@ -284,16 +284,68 @@ void Database::migrate() {
     }
 
     const auto version_6_applied = query("SELECT version FROM exchange_schema_versions WHERE version=6");
-    if (!version_6_applied.empty()) {
+    if (version_6_applied.empty()) {
+        const auto reopenable_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
+              AND COLUMN_NAME='reopenable' LIMIT 1)sql");
+        if (reopenable_column.empty()) {
+            execute("ALTER TABLE exchange_markets ADD COLUMN reopenable BOOLEAN NOT NULL DEFAULT FALSE AFTER active");
+        }
+        execute("INSERT INTO exchange_schema_versions(version) VALUES (6)");
+    }
+
+    const auto version_7_applied = query("SELECT version FROM exchange_schema_versions WHERE version=7");
+    if (!version_7_applied.empty()) {
         return;
     }
-    const auto reopenable_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+    execute(R"sql(CREATE TABLE IF NOT EXISTS exchange_books (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        item_type VARCHAR(160) NOT NULL,
+        item_data INT NOT NULL DEFAULT 0,
+        item_nbt LONGBLOB NOT NULL,
+        item_name VARCHAR(255) NOT NULL,
+        item_hash BINARY(32) NOT NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        UNIQUE KEY uq_exchange_books_item_hash (item_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci)sql");
+    execute(R"sql(INSERT IGNORE INTO exchange_books(item_type,item_data,item_nbt,item_name,item_hash)
+        SELECT item_type,item_data,item_nbt,item_name,
+               UNHEX(SHA2(CONCAT(CHAR_LENGTH(item_type),':',item_type,':',item_data,':',
+                                  OCTET_LENGTH(item_nbt),':',item_nbt),256))
+        FROM exchange_markets ORDER BY id)sql");
+    const auto book_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
-          AND COLUMN_NAME='reopenable' LIMIT 1)sql");
-    if (reopenable_column.empty()) {
-        execute("ALTER TABLE exchange_markets ADD COLUMN reopenable BOOLEAN NOT NULL DEFAULT FALSE AFTER active");
+          AND COLUMN_NAME='book_id' LIMIT 1)sql");
+    if (book_column.empty()) {
+        execute("ALTER TABLE exchange_markets ADD COLUMN book_id BIGINT UNSIGNED NULL AFTER id");
     }
-    execute("INSERT INTO exchange_schema_versions(version) VALUES (6)");
+    execute(R"sql(UPDATE exchange_markets m JOIN exchange_books b
+        ON b.item_hash=UNHEX(SHA2(CONCAT(CHAR_LENGTH(m.item_type),':',m.item_type,':',m.item_data,':',
+                                         OCTET_LENGTH(m.item_nbt),':',m.item_nbt),256))
+        SET m.book_id=b.id WHERE m.book_id IS NULL)sql");
+    if (!query("SELECT id FROM exchange_markets WHERE book_id IS NULL LIMIT 1").empty()) {
+        throw DatabaseError("schema migration 7 could not assign every market to an order book");
+    }
+    const auto nullable_book_column = query(R"sql(SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets' AND COLUMN_NAME='book_id'
+          AND IS_NULLABLE='YES' LIMIT 1)sql");
+    if (!nullable_book_column.empty()) {
+        execute("ALTER TABLE exchange_markets MODIFY COLUMN book_id BIGINT UNSIGNED NOT NULL");
+    }
+    const auto book_index = query(R"sql(SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
+          AND INDEX_NAME='idx_exchange_markets_book' LIMIT 1)sql");
+    if (book_index.empty()) {
+        execute("CREATE INDEX idx_exchange_markets_book ON exchange_markets(book_id,id)");
+    }
+    const auto book_foreign_key = query(R"sql(SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='exchange_markets'
+          AND CONSTRAINT_NAME='fk_exchange_markets_book' LIMIT 1)sql");
+    if (book_foreign_key.empty()) {
+        execute(R"sql(ALTER TABLE exchange_markets ADD CONSTRAINT fk_exchange_markets_book
+            FOREIGN KEY (book_id) REFERENCES exchange_books(id))sql");
+    }
+    execute("INSERT INTO exchange_schema_versions(version) VALUES (7)");
 }
 
 void Database::ping() {

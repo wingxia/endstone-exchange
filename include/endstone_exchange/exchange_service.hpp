@@ -50,6 +50,7 @@ class ExchangeService {
     int max_order_quantity_;
 
     [[nodiscard]] static Market marketFromRow(const QueryRow &row);
+    [[nodiscard]] Id lockActiveBook(Id market_id);
     [[nodiscard]] Cents lockedBalance(std::string_view player_uuid);
     void credit(std::string_view player_uuid, Cents amount, std::string_view reason,
                 std::string_view reference_type = {}, std::optional<Id> reference_id = std::nullopt);

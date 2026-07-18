@@ -116,11 +116,27 @@ Market ExchangeService::activateMarket(const Market &market) {
         throw std::runtime_error("target already has an active market");
     }
 
+    const auto item_type = database_.quote(market.item.type);
+    const auto item_nbt = Database::hexLiteral(market.item.nbt);
+    const auto item_hash = std::format(
+        "UNHEX(SHA2(CONCAT(CHAR_LENGTH({0}),':',{0},':',{1},':',OCTET_LENGTH({2}),':',{2}),256))", item_type,
+        market.item.data, item_nbt);
+    database_.execute(std::format(
+        "INSERT INTO exchange_books(item_type,item_data,item_nbt,item_name,item_hash) VALUES ({},{},{},{},{}) "
+        "ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)",
+        item_type, market.item.data, item_nbt, database_.quote(market.item.name), item_hash));
+    const auto book_id = static_cast<Id>(database_.lastInsertId());
+    const auto book = database_.query(std::format(
+        "SELECT id FROM exchange_books WHERE id={} AND item_type={} AND item_data={} AND item_nbt={} FOR UPDATE",
+        book_id, item_type, market.item.data, item_nbt));
+    if (book.empty()) {
+        throw std::runtime_error("item order-book fingerprint collision");
+    }
+
     const auto resumable = database_.query(std::format(
         "SELECT id FROM exchange_markets WHERE target_key={} AND target_kind={} AND active=0 AND reopenable=1 "
-        "AND item_type={} AND item_data={} AND item_nbt={} ORDER BY id DESC LIMIT 1 FOR UPDATE",
-        database_.quote(market.target_key), database_.quote(toSql(market.target_kind)),
-        database_.quote(market.item.type), market.item.data, Database::hexLiteral(market.item.nbt)));
+        "AND book_id={} ORDER BY id DESC LIMIT 1 FOR UPDATE",
+        database_.quote(market.target_key), database_.quote(toSql(market.target_kind)), book_id));
     if (!resumable.empty()) {
         const auto id = static_cast<Id>(cellInt64(resumable.front(), 0));
         database_.execute(
@@ -140,12 +156,11 @@ Market ExchangeService::activateMarket(const Market &market) {
     const auto block_z = market.block_z ? std::to_string(*market.block_z) : "NULL";
     const auto actor_id = market.actor_id ? std::to_string(*market.actor_id) : "NULL";
     database_.execute(std::format(
-        "INSERT INTO exchange_markets(target_key,target_kind,dimension_name,block_x,block_y,block_z,actor_id,"
-        "item_type,item_data,item_nbt,item_name,active,created_by) VALUES ({},{},{},{},{},{},{},{},{},{},{},1,{})",
-        database_.quote(market.target_key), database_.quote(toSql(market.target_kind)),
-        database_.quote(market.dimension_name), block_x, block_y, block_z, actor_id, database_.quote(market.item.type),
-        market.item.data, Database::hexLiteral(market.item.nbt), database_.quote(market.item.name),
-        database_.quote(market.created_by)));
+        "INSERT INTO exchange_markets(book_id,target_key,target_kind,dimension_name,block_x,block_y,block_z,actor_id,"
+        "item_type,item_data,item_nbt,item_name,active,created_by) VALUES ({},{},{},{},{},{},{},{},{},{},{},{},1,{})",
+        book_id, database_.quote(market.target_key), database_.quote(toSql(market.target_kind)),
+        database_.quote(market.dimension_name), block_x, block_y, block_z, actor_id, item_type, market.item.data, item_nbt,
+        database_.quote(market.item.name), database_.quote(market.created_by)));
     const auto id = static_cast<Id>(database_.lastInsertId());
     database_.execute(std::format("INSERT INTO exchange_target_bindings(target_key,market_id) VALUES ({},{})",
                                   database_.quote(market.target_key), id));
@@ -182,10 +197,22 @@ void ExchangeService::closeMarket(const Id market_id) {
 
 void ExchangeService::retireMarket(const Id market_id) {
     Transaction transaction(database_);
+    const auto identity =
+        database_.query(std::format("SELECT book_id FROM exchange_markets WHERE id={}", market_id));
+    if (identity.empty()) {
+        throw std::runtime_error("market does not exist");
+    }
+    const auto book_id = static_cast<Id>(cellInt64(identity.front(), 0));
+    if (database_.query(std::format("SELECT id FROM exchange_books WHERE id={} FOR UPDATE", book_id)).empty()) {
+        throw std::runtime_error("market order book does not exist");
+    }
     const auto market = database_.query(
-        std::format("SELECT active,target_key FROM exchange_markets WHERE id={} FOR UPDATE", market_id));
+        std::format("SELECT active,target_key,book_id FROM exchange_markets WHERE id={} FOR UPDATE", market_id));
     if (market.empty()) {
         throw std::runtime_error("market does not exist");
+    }
+    if (static_cast<Id>(cellInt64(market.front(), 2)) != book_id) {
+        throw std::runtime_error("market order-book identity changed unexpectedly");
     }
 
     const auto orders = database_.query(
@@ -218,8 +245,8 @@ void ExchangeService::retireMarket(const Id market_id) {
 
 std::optional<Market> ExchangeService::findMarketByTarget(const std::string_view target_key) {
     const auto rows = database_.query(std::format(
-        "SELECT m.id,m.target_key,m.target_kind,m.dimension_name,m.block_x,m.block_y,m.block_z,m.actor_id,m.item_type,"
-        "m.item_data,m.item_nbt,m.item_name,m.active,m.created_by FROM exchange_target_bindings b "
+        "SELECT m.id,m.book_id,m.target_key,m.target_kind,m.dimension_name,m.block_x,m.block_y,m.block_z,m.actor_id,"
+        "m.item_type,m.item_data,m.item_nbt,m.item_name,m.active,m.created_by FROM exchange_target_bindings b "
         "JOIN exchange_markets m ON m.id=b.market_id WHERE b.target_key={} AND m.active=1",
         database_.quote(target_key)));
     return rows.empty() ? std::nullopt : std::optional<Market>(marketFromRow(rows.front()));
@@ -227,16 +254,16 @@ std::optional<Market> ExchangeService::findMarketByTarget(const std::string_view
 
 std::optional<Market> ExchangeService::findMarket(const Id market_id) {
     const auto rows = database_.query(std::format(
-        "SELECT id,target_key,target_kind,dimension_name,block_x,block_y,block_z,actor_id,item_type,item_data,item_nbt,"
-        "item_name,active,created_by FROM exchange_markets WHERE id={}",
+        "SELECT id,book_id,target_key,target_kind,dimension_name,block_x,block_y,block_z,actor_id,item_type,item_data,"
+        "item_nbt,item_name,active,created_by FROM exchange_markets WHERE id={}",
         market_id));
     return rows.empty() ? std::nullopt : std::optional<Market>(marketFromRow(rows.front()));
 }
 
 std::vector<Market> ExchangeService::activeMarkets() {
     const auto rows = database_.query(
-        "SELECT m.id,m.target_key,m.target_kind,m.dimension_name,m.block_x,m.block_y,m.block_z,m.actor_id,m.item_type,"
-        "m.item_data,m.item_nbt,m.item_name,m.active,m.created_by FROM exchange_target_bindings b "
+        "SELECT m.id,m.book_id,m.target_key,m.target_kind,m.dimension_name,m.block_x,m.block_y,m.block_z,m.actor_id,"
+        "m.item_type,m.item_data,m.item_nbt,m.item_name,m.active,m.created_by FROM exchange_target_bindings b "
         "JOIN exchange_markets m ON m.id=b.market_id WHERE m.active=1 ORDER BY m.id");
     std::vector<Market> result;
     result.reserve(rows.size());
@@ -250,25 +277,35 @@ OrderBook ExchangeService::orderBook(const Id market_id, const int depth) {
     if (depth <= 0 || depth > 50) {
         throw std::runtime_error("order-book depth must be between 1 and 50");
     }
+    const auto market =
+        database_.query(std::format("SELECT book_id FROM exchange_markets WHERE id={}", market_id));
+    if (market.empty()) {
+        throw std::runtime_error("market does not exist");
+    }
+    const auto book_id = static_cast<Id>(cellInt64(market.front(), 0));
     OrderBook result;
-    const auto bids = database_.query(
-        std::format("SELECT price_cents,SUM(remaining_qty) FROM exchange_orders WHERE market_id={} AND side='BUY' "
-                    "AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') GROUP BY price_cents "
+    const auto bids = database_.query(std::format(
+        "SELECT o.price_cents,SUM(o.remaining_qty) FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id WHERE m.book_id={} AND o.side='BUY' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY o.price_cents "
                     "ORDER BY price_cents DESC LIMIT {}",
-                    market_id, depth));
+        book_id, depth));
     for (const auto &row : bids) {
         result.bids.push_back({cellInt64(row, 0), cellInt(row, 1)});
     }
-    const auto asks = database_.query(
-        std::format("SELECT price_cents,SUM(remaining_qty) FROM exchange_orders WHERE market_id={} AND side='SELL' "
-                    "AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') GROUP BY price_cents "
+    const auto asks = database_.query(std::format(
+        "SELECT o.price_cents,SUM(o.remaining_qty) FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id WHERE m.book_id={} AND o.side='SELL' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY o.price_cents "
                     "ORDER BY price_cents ASC LIMIT {}",
-                    market_id, depth));
+        book_id, depth));
     for (const auto &row : asks) {
         result.asks.push_back({cellInt64(row, 0), cellInt(row, 1)});
     }
-    const auto last = database_.query(
-        std::format("SELECT price_cents FROM exchange_trades WHERE market_id={} ORDER BY id DESC LIMIT 1", market_id));
+    const auto last = database_.query(std::format(
+        "SELECT t.price_cents FROM exchange_trades t JOIN exchange_markets m ON m.id=t.market_id "
+        "WHERE m.book_id={} ORDER BY t.id DESC LIMIT 1",
+        book_id));
     if (!last.empty()) {
         result.last_price_cents = cellInt64(last.front(), 0);
     }
@@ -284,33 +321,60 @@ std::unordered_map<Id, OrderBook> ExchangeService::topOfBooks(const std::vector<
         result.try_emplace(id);
     }
     const auto ids = idList(market_ids);
-    const auto bids = database_.query(
-        std::format("SELECT o.market_id,o.price_cents,LEAST(SUM(o.remaining_qty),2147483647) FROM exchange_orders o "
-                    "JOIN (SELECT market_id,MAX(price_cents) price_cents FROM exchange_orders WHERE market_id IN ({}) "
-                    "AND side='BUY' AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') GROUP BY market_id) best "
-                    "ON best.market_id=o.market_id AND best.price_cents=o.price_cents WHERE o.side='BUY' "
-                    "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY o.market_id,o.price_cents",
-                    ids));
-    for (const auto &row : bids) {
-        result[static_cast<Id>(cellInt64(row, 0))].bids.push_back({cellInt64(row, 1), cellInt(row, 2)});
+    const auto market_books = database_.query(
+        std::format("SELECT id,book_id FROM exchange_markets WHERE id IN ({})", ids));
+    std::unordered_map<Id, Id> book_by_market;
+    std::vector<Id> book_ids;
+    for (const auto &row : market_books) {
+        const auto market_id = static_cast<Id>(cellInt64(row, 0));
+        const auto book_id = static_cast<Id>(cellInt64(row, 1));
+        book_by_market[market_id] = book_id;
+        if (std::find(book_ids.begin(), book_ids.end(), book_id) == book_ids.end()) {
+            book_ids.push_back(book_id);
+        }
     }
-    const auto asks = database_.query(
-        std::format("SELECT o.market_id,o.price_cents,LEAST(SUM(o.remaining_qty),2147483647) FROM exchange_orders o "
-                    "JOIN (SELECT market_id,MIN(price_cents) price_cents FROM exchange_orders WHERE market_id IN ({}) "
-                    "AND side='SELL' AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') GROUP BY market_id) best "
-                    "ON best.market_id=o.market_id AND best.price_cents=o.price_cents WHERE o.side='SELL' "
-                    "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY o.market_id,o.price_cents",
-                    ids));
+    if (book_ids.empty()) {
+        return result;
+    }
+    const auto books = idList(book_ids);
+    std::unordered_map<Id, OrderBook> by_book;
+    const auto bids = database_.query(std::format(
+        "SELECT m.book_id,o.price_cents,LEAST(SUM(o.remaining_qty),2147483647) FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id "
+        "JOIN (SELECT m2.book_id,MAX(o2.price_cents) price_cents FROM exchange_orders o2 "
+        "JOIN exchange_markets m2 ON m2.id=o2.market_id WHERE m2.book_id IN ({}) AND o2.side='BUY' "
+        "AND o2.order_type='LIMIT' AND o2.status IN ('OPEN','PARTIAL') GROUP BY m2.book_id) best "
+        "ON best.book_id=m.book_id AND best.price_cents=o.price_cents WHERE o.side='BUY' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY m.book_id,o.price_cents",
+        books));
+    for (const auto &row : bids) {
+        by_book[static_cast<Id>(cellInt64(row, 0))].bids.push_back({cellInt64(row, 1), cellInt(row, 2)});
+    }
+    const auto asks = database_.query(std::format(
+        "SELECT m.book_id,o.price_cents,LEAST(SUM(o.remaining_qty),2147483647) FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id "
+        "JOIN (SELECT m2.book_id,MIN(o2.price_cents) price_cents FROM exchange_orders o2 "
+        "JOIN exchange_markets m2 ON m2.id=o2.market_id WHERE m2.book_id IN ({}) AND o2.side='SELL' "
+        "AND o2.order_type='LIMIT' AND o2.status IN ('OPEN','PARTIAL') GROUP BY m2.book_id) best "
+        "ON best.book_id=m.book_id AND best.price_cents=o.price_cents WHERE o.side='SELL' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') GROUP BY m.book_id,o.price_cents",
+        books));
     for (const auto &row : asks) {
-        result[static_cast<Id>(cellInt64(row, 0))].asks.push_back({cellInt64(row, 1), cellInt(row, 2)});
+        by_book[static_cast<Id>(cellInt64(row, 0))].asks.push_back({cellInt64(row, 1), cellInt(row, 2)});
     }
     const auto trades = database_.query(std::format(
-        "SELECT t.market_id,t.price_cents FROM exchange_trades t "
-        "JOIN (SELECT market_id,MAX(id) trade_id FROM exchange_trades WHERE market_id IN ({}) GROUP BY market_id) "
-        "latest ON latest.trade_id=t.id",
-        ids));
+        "SELECT m.book_id,t.price_cents FROM exchange_trades t JOIN exchange_markets m ON m.id=t.market_id "
+        "JOIN (SELECT m2.book_id,MAX(t2.id) trade_id FROM exchange_trades t2 "
+        "JOIN exchange_markets m2 ON m2.id=t2.market_id WHERE m2.book_id IN ({}) GROUP BY m2.book_id) latest "
+        "ON latest.trade_id=t.id",
+        books));
     for (const auto &row : trades) {
-        result[static_cast<Id>(cellInt64(row, 0))].last_price_cents = cellInt64(row, 1);
+        by_book[static_cast<Id>(cellInt64(row, 0))].last_price_cents = cellInt64(row, 1);
+    }
+    for (const auto &[market_id, book_id] : book_by_market) {
+        if (const auto book = by_book.find(book_id); book != by_book.end()) {
+            result[market_id] = book->second;
+        }
     }
     return result;
 }
@@ -323,11 +387,7 @@ ExecutionResult ExchangeService::placeOrder(const OrderRequest &request) {
 
 ExecutionResult ExchangeService::placeBuy(const OrderRequest &request) {
     Transaction transaction(database_);
-    const auto market =
-        database_.query(std::format("SELECT active FROM exchange_markets WHERE id={} FOR UPDATE", request.market_id));
-    if (market.empty() || cellInt(market.front(), 0) == 0) {
-        throw std::runtime_error("market is not active");
-    }
+    const auto book_id = lockActiveBook(request.market_id);
 
     auto available_balance = lockedBalance(request.player_uuid);
     Cents reserved = 0;
@@ -350,12 +410,13 @@ ExecutionResult ExchangeService::placeBuy(const OrderRequest &request) {
     }
 
     const auto price_filter =
-        request.type == OrderType::Limit ? std::format("AND price_cents<={}", request.price_cents) : std::string{};
+        request.type == OrderType::Limit ? std::format("AND o.price_cents<={}", request.price_cents) : std::string{};
     const auto asks = database_.query(std::format(
-        "SELECT id,player_uuid,price_cents,remaining_qty FROM exchange_orders WHERE market_id={} AND side='SELL' "
-        "AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') AND player_uuid<>{} {} "
-        "ORDER BY price_cents ASC,id ASC FOR UPDATE",
-        request.market_id, database_.quote(request.player_uuid), price_filter));
+        "SELECT o.id,o.player_uuid,o.price_cents,o.remaining_qty FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id WHERE m.book_id={} AND o.side='SELL' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') AND o.player_uuid<>{} {} "
+        "ORDER BY o.price_cents ASC,o.id ASC FOR UPDATE",
+        book_id, database_.quote(request.player_uuid), price_filter));
 
     int remaining = request.quantity;
     int filled_total = 0;
@@ -424,11 +485,7 @@ ExecutionResult ExchangeService::placeSell(const OrderRequest &request) {
 }
 
 ExecutionResult ExchangeService::placeSellLocked(const OrderRequest &request) {
-    const auto market =
-        database_.query(std::format("SELECT active FROM exchange_markets WHERE id={} FOR UPDATE", request.market_id));
-    if (market.empty() || cellInt(market.front(), 0) == 0) {
-        throw std::runtime_error("market is not active");
-    }
+    const auto book_id = lockActiveBook(request.market_id);
     static_cast<void>(lockedBalance(request.player_uuid));
 
     database_.execute(std::format(
@@ -439,12 +496,13 @@ ExecutionResult ExchangeService::placeSellLocked(const OrderRequest &request) {
     const auto order_id = static_cast<Id>(database_.lastInsertId());
 
     const auto price_filter =
-        request.type == OrderType::Limit ? std::format("AND price_cents>={}", request.price_cents) : std::string{};
+        request.type == OrderType::Limit ? std::format("AND o.price_cents>={}", request.price_cents) : std::string{};
     const auto bids = database_.query(std::format(
-        "SELECT id,player_uuid,price_cents,remaining_qty,reserved_cents FROM exchange_orders WHERE market_id={} "
-        "AND side='BUY' AND order_type='LIMIT' AND status IN ('OPEN','PARTIAL') AND player_uuid<>{} {} "
-        "ORDER BY price_cents DESC,id ASC FOR UPDATE",
-        request.market_id, database_.quote(request.player_uuid), price_filter));
+        "SELECT o.id,o.player_uuid,o.price_cents,o.remaining_qty,o.reserved_cents FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id WHERE m.book_id={} AND o.side='BUY' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') AND o.player_uuid<>{} {} "
+        "ORDER BY o.price_cents DESC,o.id ASC FOR UPDATE",
+        book_id, database_.quote(request.player_uuid), price_filter));
 
     int remaining = request.quantity;
     int filled_total = 0;
@@ -878,23 +936,44 @@ std::vector<SellEscrow> ExchangeService::unfinishedSellEscrows(const std::string
 Market ExchangeService::marketFromRow(const QueryRow &row) {
     Market result;
     result.id = static_cast<Id>(cellInt64(row, 0));
-    result.target_key = cellString(row, 1);
-    result.target_kind = cellString(row, 2) == "BLOCK" ? TargetKind::Block : TargetKind::Actor;
-    result.dimension_name = cellString(row, 3);
-    if (const auto value = optionalInt64(row, 4)) {
+    result.book_id = static_cast<Id>(cellInt64(row, 1));
+    result.target_key = cellString(row, 2);
+    result.target_kind = cellString(row, 3) == "BLOCK" ? TargetKind::Block : TargetKind::Actor;
+    result.dimension_name = cellString(row, 4);
+    if (const auto value = optionalInt64(row, 5)) {
         result.block_x = static_cast<int>(*value);
     }
-    if (const auto value = optionalInt64(row, 5)) {
+    if (const auto value = optionalInt64(row, 6)) {
         result.block_y = static_cast<int>(*value);
     }
-    if (const auto value = optionalInt64(row, 6)) {
+    if (const auto value = optionalInt64(row, 7)) {
         result.block_z = static_cast<int>(*value);
     }
-    result.actor_id = optionalInt64(row, 7);
-    result.item = {cellString(row, 8), cellInt(row, 9), bytesFromCell(row, 10), cellString(row, 11)};
-    result.active = cellInt(row, 12) != 0;
-    result.created_by = cellString(row, 13);
+    result.actor_id = optionalInt64(row, 8);
+    result.item = {cellString(row, 9), cellInt(row, 10), bytesFromCell(row, 11), cellString(row, 12)};
+    result.active = cellInt(row, 13) != 0;
+    result.created_by = cellString(row, 14);
     return result;
+}
+
+Id ExchangeService::lockActiveBook(const Id market_id) {
+    const auto identity = database_.query(std::format("SELECT book_id FROM exchange_markets WHERE id={}", market_id));
+    if (identity.empty()) {
+        throw std::runtime_error("market does not exist");
+    }
+    const auto book_id = static_cast<Id>(cellInt64(identity.front(), 0));
+    if (database_.query(std::format("SELECT id FROM exchange_books WHERE id={} FOR UPDATE", book_id)).empty()) {
+        throw std::runtime_error("market order book does not exist");
+    }
+    const auto market = database_.query(
+        std::format("SELECT active,book_id FROM exchange_markets WHERE id={} FOR UPDATE", market_id));
+    if (market.empty() || cellInt(market.front(), 0) == 0) {
+        throw std::runtime_error("market is not active");
+    }
+    if (static_cast<Id>(cellInt64(market.front(), 1)) != book_id) {
+        throw std::runtime_error("market order-book identity changed unexpectedly");
+    }
+    return book_id;
 }
 
 Cents ExchangeService::lockedBalance(const std::string_view player_uuid) {

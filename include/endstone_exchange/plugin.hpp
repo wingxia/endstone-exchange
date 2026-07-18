@@ -3,6 +3,7 @@
 #include "endstone_exchange/config.hpp"
 #include "endstone_exchange/domain.hpp"
 #include "endstone_exchange/exchange_service.hpp"
+#include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/price_window.hpp"
 
 #include <endstone/endstone.hpp>
@@ -11,6 +12,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace exchange {
@@ -41,6 +43,8 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_map<Id, std::int64_t> hologram_ids_;
     std::unordered_map<Id, OrderBook> hologram_books_;
     std::unordered_map<std::string, std::string> pending_frame_captures_;
+    InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
+    std::unordered_set<std::string> open_trade_forms_;
     std::shared_ptr<endstone::Task> refresh_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
     bool ready_{false};
@@ -52,7 +56,7 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] std::optional<Id> marketIdForActor(const endstone::Actor &actor) const;
     [[nodiscard]] std::optional<ItemPrototype> prototypeForBlock(endstone::Block &block);
     [[nodiscard]] std::optional<ItemPrototype> prototypeForActor(endstone::Actor &actor);
-    [[nodiscard]] endstone::ItemStack makeItemStack(const ItemPrototype &prototype, int amount) const;
+    [[nodiscard]] bool acceptInteraction(const endstone::Player &player);
 
     void toggleBlock(endstone::Player &player, endstone::Block &block);
     void queueItemFrameToggle(endstone::Player &player, endstone::Block &block);

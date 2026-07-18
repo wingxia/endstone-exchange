@@ -1,13 +1,17 @@
 #include "endstone_exchange/config.hpp"
 #include "endstone_exchange/database.hpp"
 #include "endstone_exchange/exchange_service.hpp"
+#include "endstone_exchange/interaction_gate.hpp"
+#include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/price_window.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 
+#include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -92,6 +96,38 @@ void testPriceSliderWindow() {
         invalid_rejected = true;
     }
     require(invalid_rejected, "price slider must reject out-of-window client values");
+}
+
+void testInteractionGate() {
+    using namespace std::chrono_literals;
+    exchange::InteractionGate gate(750ms);
+    const auto start = exchange::InteractionGate::Clock::time_point{} + 10s;
+    require(gate.accept("player", start), "first interaction must be accepted");
+    require(!gate.accept("player", start + 1ms), "duplicate packet in the same click must be rejected");
+    require(!gate.accept("player", start + 749ms), "interaction stays blocked for the full cooldown");
+    require(gate.accept("player", start + 750ms), "a deliberate later click must be accepted");
+    require(gate.accept("other-player", start + 1ms), "players must have independent interaction gates");
+    gate.clear();
+    require(gate.accept("player", start + 751ms), "clearing plugin state must release the gate");
+}
+
+void testCanonicalItemIdentity() {
+    endstone::CompoundTag empty;
+    const exchange::ItemPrototype plain{"minecraft:emerald_block", 0, exchange::NbtCodec::encode(empty),
+                                        "Emerald Block"};
+    require(exchange::matchesItemIdentity(plain, "minecraft:emerald_block", 0, empty),
+            "a newly acquired plain item must match the stored market identity");
+    require(!exchange::matchesItemIdentity(plain, "minecraft:emerald", 0, empty),
+            "different item types must not pass inventory verification");
+
+    endstone::CompoundTag named;
+    named.insert_or_assign("display", endstone::StringTag("custom"));
+    require(!exchange::matchesItemIdentity(plain, "minecraft:emerald_block", 0, named),
+            "custom NBT must not be silently exchanged for a plain market item");
+    const exchange::ItemPrototype custom{"minecraft:emerald_block", 0, exchange::NbtCodec::encode(named),
+                                         "Custom Emerald Block"};
+    require(exchange::matchesItemIdentity(custom, "minecraft:emerald_block", 0, named),
+            "an exact custom item must pass canonical inventory verification");
 }
 
 void appendLittle16(std::vector<std::uint8_t> &bytes, const std::uint16_t value) {
@@ -216,6 +252,7 @@ void truncateExchangeTables(exchange::Database &database) {
     database.execute("TRUNCATE TABLE exchange_trades");
     database.execute("TRUNCATE TABLE exchange_orders");
     database.execute("TRUNCATE TABLE exchange_markets");
+    database.execute("TRUNCATE TABLE exchange_books");
     database.execute("TRUNCATE TABLE exchange_accounts");
     database.execute("SET FOREIGN_KEY_CHECKS=1");
 }
@@ -252,7 +289,38 @@ void testDatabaseIntegration() {
     require(reopenable_column.size() == 1, "version 5 upgrade must add the reopenable market column");
     database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
-    require(exchange::cellInt(schema_version.front(), 0) == 6, "database migrations must be idempotent at version 6");
+    require(exchange::cellInt(schema_version.front(), 0) == 7, "database migrations must be idempotent at version 7");
+    const auto book_schema = database.query(
+        "SELECT m.book_id,b.id FROM exchange_markets m LEFT JOIN exchange_books b ON b.id=m.book_id LIMIT 1");
+    require(book_schema.empty() || exchange::cellInt64(book_schema.front(), 0) == exchange::cellInt64(book_schema.front(), 1),
+            "every upgraded market must reference a durable item order book");
+
+    truncateExchangeTables(database);
+    exchange::ExchangeService upgrade_seed_service(database, 100'000, 2304);
+    exchange::Market upgrade_seed;
+    upgrade_seed.target_key = "block|overworld|90|64|0";
+    upgrade_seed.target_kind = exchange::TargetKind::Block;
+    upgrade_seed.dimension_name = "overworld";
+    upgrade_seed.block_x = 90;
+    upgrade_seed.block_y = 64;
+    upgrade_seed.block_z = 0;
+    upgrade_seed.item = {"minecraft:emerald_block", 0, {}, "Block of Emerald"};
+    upgrade_seed.created_by = "upgrade-test";
+    static_cast<void>(upgrade_seed_service.activateMarket(upgrade_seed));
+    upgrade_seed.target_key = "block|overworld|91|64|0";
+    upgrade_seed.block_x = 91;
+    static_cast<void>(upgrade_seed_service.activateMarket(upgrade_seed));
+    database.execute("ALTER TABLE exchange_markets DROP FOREIGN KEY fk_exchange_markets_book");
+    database.execute("DROP INDEX idx_exchange_markets_book ON exchange_markets");
+    database.execute("ALTER TABLE exchange_markets DROP COLUMN book_id");
+    database.execute("DROP TABLE exchange_books");
+    database.execute("DELETE FROM exchange_schema_versions WHERE version=7");
+    database.migrate();
+    const auto backfilled_books = database.query(
+        "SELECT COUNT(DISTINCT book_id),(SELECT COUNT(*) FROM exchange_books) FROM exchange_markets");
+    require(exchange::cellInt(backfilled_books.front(), 0) == 1 && exchange::cellInt(backfilled_books.front(), 1) == 1,
+            "version 6 upgrade must merge identical item snapshots into one shared book");
+
     database.execute("SET SESSION wait_timeout=1");
     std::this_thread::sleep_for(std::chrono::seconds(2));
     database.ping();
@@ -554,6 +622,122 @@ void testDatabaseIntegration() {
     require(service.balance(Alice) == buyer_balance_before_cross - 3'000,
             "canceling the two-unit remainder refunds exactly the remaining 20.00 reserve");
 
+    endstone::CompoundTag shared_nbt;
+    shared_nbt.insert_or_assign("series", endstone::StringTag("shared-book"));
+    auto shared_market_a = replacement;
+    shared_market_a.id = 0;
+    shared_market_a.book_id = 0;
+    shared_market_a.target_key = "block|overworld|2|64|0";
+    shared_market_a.block_x = 2;
+    shared_market_a.item = {"minecraft:gold_ingot", 0, exchange::NbtCodec::encode(shared_nbt), "Gold Ingot"};
+    shared_market_a = service.activateMarket(shared_market_a);
+    auto shared_market_b = shared_market_a;
+    shared_market_b.id = 0;
+    shared_market_b.book_id = 0;
+    shared_market_b.target_key = "block|overworld|3|64|0";
+    shared_market_b.block_x = 3;
+    shared_market_b = service.activateMarket(shared_market_b);
+    require(shared_market_a.id != shared_market_b.id && shared_market_a.book_id == shared_market_b.book_id,
+            "same exact item at different world positions must use independent targets and one shared book");
+
+    const auto cross_venue_bid = service.placeOrder(
+        {shared_market_a.id, std::string(Charlie), "Charlie", exchange::Side::Buy,
+         exchange::OrderType::Limit, 333, 4});
+    book = service.orderBook(shared_market_b.id, 5);
+    require(book.bids.size() == 1 && book.bids.front().price_cents == 333 && book.bids.front().quantity == 4,
+            "an order placed at one position must appear at every position for the same item");
+    const auto shared_tops = service.topOfBooks({shared_market_a.id, shared_market_b.id});
+    require(shared_tops.at(shared_market_a.id).bids.size() == 1 &&
+                shared_tops.at(shared_market_b.id).bids.size() == 1 &&
+                shared_tops.at(shared_market_a.id).bids.front().price_cents ==
+                    shared_tops.at(shared_market_b.id).bids.front().price_cents &&
+                shared_tops.at(shared_market_a.id).bids.front().quantity ==
+                    shared_tops.at(shared_market_b.id).bids.front().quantity,
+            "hologram top-of-book snapshots must agree across shared-item positions");
+    const auto cross_venue_sell = service.placeOrder(
+        {shared_market_b.id, std::string(Bob), "Bob", exchange::Side::Sell,
+         exchange::OrderType::Limit, 300, 2});
+    require(cross_venue_sell.filled_quantity == 2 && cross_venue_sell.gross_cents == 666,
+            "a sell submitted at another position must match the shared resting bid at maker price");
+    service.closeMarket(shared_market_a.id);
+    require(!service.findMarketByTarget(shared_market_a.target_key).has_value() &&
+                service.findMarketByTarget(shared_market_b.target_key).has_value(),
+            "closing one shared-item position must not close another position");
+    book = service.orderBook(shared_market_b.id, 5);
+    require(book.bids.size() == 1 && book.bids.front().quantity == 2,
+            "closing one position must preserve and expose the shared remaining order");
+    const auto final_cross_venue_sell = service.placeOrder(
+        {shared_market_b.id, std::string(Bob), "Bob", exchange::Side::Sell,
+         exchange::OrderType::Market, 0, 2});
+    require(final_cross_venue_sell.filled_quantity == 2 && service.orderBook(shared_market_b.id, 5).bids.empty(),
+            "the remaining shared order must stay executable through the open position");
+    static_cast<void>(cross_venue_bid);
+    const auto paused_market_id = shared_market_a.id;
+    shared_market_a = service.activateMarket(shared_market_a);
+    require(shared_market_a.id == paused_market_id && shared_market_a.book_id == shared_market_b.book_id,
+            "reopening a paused position must resume its physical market on the shared book");
+
+    const auto trades_before_concurrency = database.query(std::format(
+        "SELECT COUNT(*) FROM exchange_trades t JOIN exchange_markets m ON m.id=t.market_id WHERE m.book_id={}",
+        shared_market_b.book_id));
+    exchange::Database concurrent_database(config);
+    concurrent_database.connect();
+    exchange::ExchangeService concurrent_service(concurrent_database, 100'000, 2304);
+    std::barrier start_together(2);
+    exchange::ExecutionResult concurrent_buy;
+    exchange::ExecutionResult concurrent_sell;
+    std::exception_ptr buy_error;
+    std::exception_ptr sell_error;
+    std::thread buyer_thread([&] {
+        start_together.arrive_and_wait();
+        try {
+            concurrent_buy = service.placeOrder(
+                {shared_market_a.id, std::string(Charlie), "Charlie", exchange::Side::Buy,
+                 exchange::OrderType::Limit, 444, 1});
+        } catch (...) {
+            buy_error = std::current_exception();
+        }
+    });
+    std::thread seller_thread([&] {
+        start_together.arrive_and_wait();
+        try {
+            concurrent_sell = concurrent_service.placeOrder(
+                {shared_market_b.id, std::string(Bob), "Bob", exchange::Side::Sell,
+                 exchange::OrderType::Limit, 444, 1});
+        } catch (...) {
+            sell_error = std::current_exception();
+        }
+    });
+    buyer_thread.join();
+    seller_thread.join();
+    if (buy_error) {
+        std::rethrow_exception(buy_error);
+    }
+    if (sell_error) {
+        std::rethrow_exception(sell_error);
+    }
+    const auto trades_after_concurrency = database.query(std::format(
+        "SELECT COUNT(*) FROM exchange_trades t JOIN exchange_markets m ON m.id=t.market_id WHERE m.book_id={}",
+        shared_market_b.book_id));
+    require(concurrent_buy.filled_quantity + concurrent_sell.filled_quantity == 1 &&
+                exchange::cellInt(trades_after_concurrency.front(), 0) ==
+                    exchange::cellInt(trades_before_concurrency.front(), 0) + 1 &&
+                service.orderBook(shared_market_b.id, 5).bids.empty() &&
+                service.orderBook(shared_market_b.id, 5).asks.empty(),
+            "simultaneous orders at different positions must serialize through the shared book without deadlock");
+
+    auto distinct_nbt_market = shared_market_b;
+    distinct_nbt_market.id = 0;
+    distinct_nbt_market.book_id = 0;
+    distinct_nbt_market.target_key = "block|overworld|4|64|0";
+    distinct_nbt_market.block_x = 4;
+    shared_nbt.insert_or_assign("series", endstone::StringTag("different-book"));
+    distinct_nbt_market.item.nbt = exchange::NbtCodec::encode(shared_nbt);
+    distinct_nbt_market = service.activateMarket(distinct_nbt_market);
+    require(distinct_nbt_market.book_id != shared_market_b.book_id &&
+                service.orderBook(distinct_nbt_market.id, 5).bids.empty(),
+            "same item type with different NBT must remain an isolated product book");
+
     const auto excess_escrow = service.prepareSellEscrow(
         {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 250, 1});
     service.markSellEscrowTagged(excess_escrow.id, 2, 1);
@@ -607,6 +791,8 @@ int main() {
         testNbtCodec();
         testConfig();
         testPriceSliderWindow();
+        testInteractionGate();
+        testCanonicalItemIdentity();
         testLevelDbStructureCapture();
         testLiveLevelDbStructureCapture();
         testDatabaseIntegration();

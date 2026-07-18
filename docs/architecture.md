@@ -6,6 +6,8 @@
 | --- | --- | --- |
 | `plugin` | Endstone events, commands, player messages, world targets and hologram actors | SQL schema or matching rules |
 | `inventory_escrow` | Hidden inventory markers, crash recovery receipts, NBT-safe delivery cleanup | Order matching or account balances |
+| `item_identity` | Canonical type, data value and complete-NBT comparison | Inventory mutation or SQL access |
+| `interaction_gate` | Per-player duplicate right-click suppression | Gameplay or database state |
 | `price_window` | Exact integer-cent mapping for Bedrock float sliders | Form rendering or database access |
 | `exchange_service` | Market generations, price-time matching, escrow state machines and settlement invariants | Endstone objects |
 | `database` | MySQL connection, timeouts, transactions and ordered schema upgrades | Gameplay decisions |
@@ -16,7 +18,8 @@ The Endstone adapter may call the domain service, but the service never calls En
 
 ## Durable identities and invariants
 
-- `exchange_markets` keeps immutable item snapshots. A manual close marks a generation reopenable; reopening the same target with the exact item identity resumes its order book, while a different item creates a new generation.
+- `exchange_books` is the durable product identity keyed by type, data value and complete NBT. All physical markets for the same exact item share its order book and matching liquidity.
+- `exchange_markets` keeps immutable item snapshots and a physical world target. A manual close marks one generation reopenable without touching its orders; reopening the same target and item resumes that generation, while another position remains independently switchable.
 - `exchange_target_bindings` is the only mutable pointer from a world target to its active generation.
 - Orders, trades and deliveries always reference an immutable market item snapshot.
 - `exchange_delivery_claims` reserves a delivery before a claim marker enters the inventory. Reconnect either applies the tagged quantity or releases the reservation.
@@ -34,6 +37,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 | 4 | Crash-recoverable sell inventory escrow |
 | 5 | Immutable balance ledger and opening-balance backfill |
 | 6 | Paused markets whose funded order books survive a manual close and resume safely |
+| 7 | Shared item books: independent physical locations with one exact-item order book |
 
 The embedded runner checks `exchange_schema_versions` and makes each upgrade retry-safe. Files under `migrations/` are the reviewable SQL equivalents; the plugin remains self-contained at deployment time.
 
@@ -42,7 +46,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 - Periodic hologram reads are one asynchronous batch snapshot, not three queries per market on the server thread.
 - The Endstone thread only applies a completed snapshot to actors.
 - Connection, read and write operations have bounded timeouts.
-- Matching transactions lock only the relevant market, account and open-order rows.
+- Matching transactions lock only the submitted physical market, account and open-order rows for its shared item book.
 
 ## Planned extension seams
 
@@ -56,7 +60,9 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 ## Required release tests
 
 - Fresh schema and upgrade from every supported schema version.
-- Price-time priority, partial fills, cancellation, market close and self-trade exclusion.
+- Price-time priority, partial fills, crossed limit prices, cancellation, market close and self-trade exclusion.
+- Same-item cross-position matching, independent position toggles and different-NBT isolation.
+- Repeated interaction packets, duplicate forms, form close after submission, main inventory and offhand sell escrow.
 - Server termination at every delivery and sell-escrow state transition, followed by reconnect recovery.
 - Full inventory, non-stackable items, custom NBT, empty and filled item frames.
 - Database timeout/reconnect, server restart, target chunk unload/reload and actor removal.

@@ -3,6 +3,7 @@
 #include "endstone_exchange/nbt_codec.hpp"
 
 #include <algorithm>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -14,6 +15,7 @@ namespace {
 constexpr std::string_view DeliveryClaimTag = "__endstone_exchange_claim";
 constexpr std::string_view SellItemTag = "__endstone_exchange_sell_item";
 constexpr std::string_view SellReceiptTag = "__endstone_exchange_sell_receipt";
+constexpr int OffHandSlot = -1;
 
 std::optional<Id> markerId(const endstone::ItemStack &item, const std::string_view marker) {
     const auto nbt = item.getNbt();
@@ -127,23 +129,40 @@ bool isInternalEscrowItem(const endstone::ItemStack &item) {
            sellReceiptEscrowId(item).has_value();
 }
 
-TaggedSellItems tagSellItems(endstone::Inventory &inventory, const ItemPrototype &prototype,
+TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,
                              const int requested_quantity, const Id escrow_id) {
     if (requested_quantity <= 0) {
         throw std::runtime_error("sell escrow quantity must be positive");
     }
-    const auto sample = sampleItem(prototype);
     std::vector<std::pair<int, endstone::ItemStack>> candidates;
     int available = 0;
+    int same_type = 0;
+    const auto collect = [&](const int slot, endstone::ItemStack item) {
+        if (isInternalEscrowItem(item)) {
+            return;
+        }
+        const auto item_type = static_cast<std::string>(item.getType().getId());
+        if (item_type == prototype.type) {
+            same_type += item.getAmount();
+        }
+        if (matchesItemIdentity(prototype, item_type, item.getData(), item.getNbt())) {
+            available += item.getAmount();
+            candidates.emplace_back(slot, std::move(item));
+        }
+    };
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         auto item = inventory.getItem(slot);
-        if (item && !isInternalEscrowItem(*item) && item->isSimilar(sample)) {
-            available += item->getAmount();
-            candidates.emplace_back(slot, std::move(*item));
+        if (item) {
+            collect(slot, std::move(*item));
         }
     }
+    if (auto offhand = inventory.getItemInOffHand()) {
+        collect(OffHandSlot, std::move(*offhand));
+    }
     if (available < requested_quantity) {
-        throw std::runtime_error("inventory does not contain enough matching items");
+        throw std::runtime_error(std::format(
+            "背包中与市场完全一致的 {} 只有 {} 件，需要 {} 件（同类型共 {} 件；名称、附魔、耐久等 NBT 必须一致）",
+            prototype.name, available, requested_quantity, same_type));
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &left, const auto &right) { return left.second.getAmount() < right.second.getAmount(); });
@@ -156,12 +175,16 @@ TaggedSellItems tagSellItems(endstone::Inventory &inventory, const ItemPrototype
         setMarker(item, SellItemTag, escrow_id);
         result.quantity += item.getAmount();
         ++result.stacks;
-        inventory.setItem(slot, std::move(item));
+        if (slot == OffHandSlot) {
+            inventory.setItemInOffHand(std::move(item));
+        } else {
+            inventory.setItem(slot, std::move(item));
+        }
     }
     return result;
 }
 
-TaggedSellItems taggedSellItems(const endstone::Inventory &inventory, const Id escrow_id) {
+TaggedSellItems taggedSellItems(const endstone::PlayerInventory &inventory, const Id escrow_id) {
     TaggedSellItems result;
     for (const auto &item : inventory.getContents()) {
         if (item && sellItemEscrowId(*item) == escrow_id) {
@@ -169,10 +192,14 @@ TaggedSellItems taggedSellItems(const endstone::Inventory &inventory, const Id e
             ++result.stacks;
         }
     }
+    if (const auto item = inventory.getItemInOffHand(); item && sellItemEscrowId(*item) == escrow_id) {
+        result.quantity += item->getAmount();
+        ++result.stacks;
+    }
     return result;
 }
 
-void restoreTaggedSellItems(endstone::Inventory &inventory, const Id escrow_id, const ItemPrototype &prototype) {
+void restoreTaggedSellItems(endstone::PlayerInventory &inventory, const Id escrow_id, const ItemPrototype &prototype) {
     const auto nbt = originalNbt(prototype);
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         auto item = inventory.getItem(slot);
@@ -181,33 +208,48 @@ void restoreTaggedSellItems(endstone::Inventory &inventory, const Id escrow_id, 
             inventory.setItem(slot, std::move(item));
         }
     }
+    auto offhand = inventory.getItemInOffHand();
+    if (offhand && sellItemEscrowId(*offhand) == escrow_id) {
+        offhand->setNbt(nbt);
+        inventory.setItemInOffHand(std::move(*offhand));
+    }
 }
 
-void replaceTaggedSellItemsWithReceipts(endstone::Inventory &inventory, const Id escrow_id) {
+void replaceTaggedSellItemsWithReceipts(endstone::PlayerInventory &inventory, const Id escrow_id) {
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         const auto item = inventory.getItem(slot);
         if (item && sellItemEscrowId(*item) == escrow_id) {
             inventory.setItem(slot, sellReceipt(escrow_id));
         }
     }
+    const auto offhand = inventory.getItemInOffHand();
+    if (offhand && sellItemEscrowId(*offhand) == escrow_id) {
+        inventory.setItemInOffHand(sellReceipt(escrow_id));
+    }
 }
 
-int sellReceiptCount(const endstone::Inventory &inventory, const Id escrow_id) {
+int sellReceiptCount(const endstone::PlayerInventory &inventory, const Id escrow_id) {
     int result = 0;
     for (const auto &item : inventory.getContents()) {
         if (item && sellReceiptEscrowId(*item) == escrow_id) {
             result += item->getAmount();
         }
     }
+    if (const auto item = inventory.getItemInOffHand(); item && sellReceiptEscrowId(*item) == escrow_id) {
+        result += item->getAmount();
+    }
     return result;
 }
 
-void removeSellReceipts(endstone::Inventory &inventory, const Id escrow_id) {
+void removeSellReceipts(endstone::PlayerInventory &inventory, const Id escrow_id) {
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         const auto item = inventory.getItem(slot);
         if (item && sellReceiptEscrowId(*item) == escrow_id) {
             inventory.clear(slot);
         }
+    }
+    if (const auto item = inventory.getItemInOffHand(); item && sellReceiptEscrowId(*item) == escrow_id) {
+        inventory.setItemInOffHand(std::nullopt);
     }
 }
 
