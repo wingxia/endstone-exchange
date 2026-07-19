@@ -7,6 +7,7 @@
 | `plugin` | Endstone events, commands, player messages, world targets and hologram actors | SQL schema or matching rules |
 | `inventory_escrow` | Hidden inventory markers, crash recovery receipts, NBT-safe delivery cleanup | Order matching or account balances |
 | `hologram_packet` | Version-pinned Bedrock `SetActorData` payload for a tiny, zero-box nameplate carrier | Markets, SQL or world lookup |
+| `market_display` | Stable label anchors, chunk coordinate mapping and simple player-facing trade text | Endstone actors, SQL or scheduling |
 | `item_identity` | Canonical type, data value and complete-NBT comparison | Inventory mutation or SQL access |
 | `interaction_gate` | Per-player duplicate right-click suppression | Gameplay or database state |
 | `price_window` | Exact integer-cent mapping for Bedrock float sliders | Form rendering or database access |
@@ -44,9 +45,9 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 
 ## Runtime performance
 
-- Periodic hologram reads are one asynchronous batch snapshot, not three queries per market on the server thread.
+- Periodic label reads are one asynchronous batch snapshot, not three queries per market on the server thread.
 - A form submission closes first and executes one tick later. After settlement, the authoritative main inventory and offhand are resent one tick later so transient escrow markers cannot leave a stale client-held item.
-- Hologram carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. This preserves the multiline nameplate without using Bedrock invisibility, which hides the nameplate too.
+- Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning; chunk reconciliation removes stale duplicates and reconnect retries restore client metadata after `AddActor` arrives.
 - The Endstone thread only applies a completed snapshot to actors.
 - Connection, read and write operations have bounded timeouts.
 - Matching transactions lock only the submitted physical market, account and open-order rows for its shared item book.
@@ -56,7 +57,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 1. Split `exchange_service` into account, market, matching and settlement repositories once a second asset class or fee model is introduced.
 2. Move all user-triggered database work onto a persistent single-writer worker with main-thread completion callbacks. Periodic holograms already use this pattern; order submission remains synchronous but timeout-bounded for the first release.
 3. Add fee, tax and operator adjustments as new ledger reasons rather than mutable side columns.
-4. Add an actor/chunk reconciliation index so missing actor targets can be quarantined instead of remaining active indefinitely.
+4. Add operator diagnostics for quarantining a missing actor target after repeated loaded-chunk reconciliation failures.
 5. Replace the structure/LevelDB item-frame adapter as soon as Endstone exposes a public item-frame inventory API.
 6. Add metrics for query latency, open orders, unresolved claims/escrows, ledger mismatches and hologram snapshot age.
 
@@ -68,5 +69,5 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 - Repeated interaction packets, duplicate forms, form close after submission, main inventory and offhand sell escrow.
 - Server termination at every delivery and sell-escrow state transition, followed by reconnect recovery.
 - Full inventory, non-stackable items, custom NBT, empty and filled item frames.
-- Database timeout/reconnect, server restart, target chunk unload/reload and actor removal.
+- Database timeout/reconnect, server restart, target chunk unload/reload, player reconnect, duplicate-label cleanup, stable label position and actor removal.
 - Ledger reconciliation after every scenario.

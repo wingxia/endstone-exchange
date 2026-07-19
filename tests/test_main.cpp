@@ -4,6 +4,7 @@
 #include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/item_identity.hpp"
+#include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/price_window.hpp"
 #include "endstone_exchange/structure_reader.hpp"
@@ -161,6 +162,37 @@ void testHologramAppearancePacket() {
             "hologram packet empty properties and tick");
 }
 
+void testMarketDisplay() {
+    require(exchange::blockToChunk(0) == 0 && exchange::blockToChunk(15) == 0 &&
+                exchange::blockToChunk(16) == 1 && exchange::blockToChunk(-1) == -1 &&
+                exchange::blockToChunk(-16) == -1 && exchange::blockToChunk(-17) == -2,
+            "block coordinates must map to Bedrock chunks using floor division");
+
+    exchange::Market market;
+    market.item.name = "Emerald Block";
+    exchange::OrderBook book;
+    book.bids.push_back({1000, 5});
+    book.asks.push_back({1200, 3});
+    const auto text = exchange::marketHologramText(market, book);
+    require(text.find("收购 10.00 × 5") != std::string::npos &&
+                text.find("出售 12.00 × 3") != std::string::npos,
+            "floating text must use simple purchase and sale wording");
+    for (const auto banned : {"\u76d8\u53e3", "\u4e70\u4e00", "\u5356\u4e00", "\u4e70\u76d8", "\u5356\u76d8"}) {
+        require(text.find(banned) == std::string::npos, "floating text must not use stock-market wording");
+    }
+
+    const exchange::HologramAnchor anchor{"Overworld", 10.5F, 65.0F, 20.5F};
+    auto moved = anchor;
+    moved.y += 1.0F;
+    require(!exchange::shouldRepositionHologram(exchange::TargetKind::Block, std::nullopt, anchor) &&
+                !exchange::shouldRepositionHologram(exchange::TargetKind::Block, anchor, moved),
+            "a block label must never be periodically teleported");
+    require(exchange::shouldRepositionHologram(exchange::TargetKind::Actor, std::nullopt, anchor) &&
+                !exchange::shouldRepositionHologram(exchange::TargetKind::Actor, anchor, anchor) &&
+                exchange::shouldRepositionHologram(exchange::TargetKind::Actor, anchor, moved),
+            "an actor label must move only when its target anchor changes");
+}
+
 void testCanonicalItemIdentity() {
     endstone::CompoundTag empty;
     const exchange::ItemPrototype plain{"minecraft:emerald_block", 0, exchange::NbtCodec::encode(empty),
@@ -308,9 +340,11 @@ void truncateExchangeTables(exchange::Database &database) {
 }
 
 void testDatabaseIntegration() {
+    const char *config_path = std::getenv("EXCHANGE_TEST_DB_CONFIG");
     const char *host = std::getenv("EXCHANGE_TEST_DB_HOST");
-    if (host == nullptr || std::string(host).empty()) {
-        std::cout << "SKIP database integration (EXCHANGE_TEST_DB_HOST is unset)\n";
+    if ((config_path == nullptr || std::string(config_path).empty()) &&
+        (host == nullptr || std::string(host).empty())) {
+        std::cout << "SKIP database integration (EXCHANGE_TEST_DB_CONFIG and EXCHANGE_TEST_DB_HOST are unset)\n";
         return;
     }
     const char *user = std::getenv("EXCHANGE_TEST_DB_USER");
@@ -318,13 +352,17 @@ void testDatabaseIntegration() {
     const char *port_text = std::getenv("EXCHANGE_TEST_DB_PORT");
 
     exchange::DatabaseConfig config;
-    config.host = host;
-    config.user = user == nullptr ? "root" : user;
-    config.password = password == nullptr ? "" : password;
-    config.name = "endstone_exchange_test";
-    if (port_text != nullptr) {
-        config.port = static_cast<unsigned int>(std::stoul(port_text));
+    if (config_path != nullptr && !std::string(config_path).empty()) {
+        config = exchange::Config::load(config_path).database;
+    } else {
+        config.host = host;
+        config.user = user == nullptr ? "root" : user;
+        config.password = password == nullptr ? "" : password;
+        if (port_text != nullptr) {
+            config.port = static_cast<unsigned int>(std::stoul(port_text));
+        }
     }
+    config.name = "endstone_exchange_test";
 
     exchange::Database database(config);
     database.connect();
@@ -843,6 +881,7 @@ int main() {
         testPriceSliderWindow();
         testInteractionGate();
         testHologramAppearancePacket();
+        testMarketDisplay();
         testCanonicalItemIdentity();
         testLevelDbStructureCapture();
         testLiveLevelDbStructureCapture();

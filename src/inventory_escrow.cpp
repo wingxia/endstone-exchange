@@ -52,7 +52,7 @@ endstone::ItemStack sampleItem(const ItemPrototype &prototype) {
 endstone::ItemStack sellReceipt(const Id escrow_id) {
     endstone::ItemStack receipt(endstone::ItemTypeId("minecraft:barrier"), 1);
     auto meta = receipt.getItemMeta();
-    meta->setDisplayName("§r交易所托管凭据");
+    meta->setDisplayName("§r交易暂存记录");
     meta->setLore(std::vector<std::string>{"§7请勿移动；系统将自动回收"});
     if (!receipt.setItemMeta(meta.get())) {
         throw std::runtime_error("cannot create sell escrow receipt");

@@ -4,6 +4,7 @@
 #include "endstone_exchange/domain.hpp"
 #include "endstone_exchange/exchange_service.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
+#include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/price_window.hpp"
 
 #include <endstone/endstone.hpp>
@@ -32,6 +33,9 @@ class ExchangePlugin : public endstone::Plugin {
     void onActorDamage(endstone::ActorDamageEvent &event);
     void onActorRemove(endstone::ActorRemoveEvent &event);
     void onPlayerJoin(endstone::PlayerJoinEvent &event);
+    void onPlayerMove(endstone::PlayerMoveEvent &event);
+    void onChunkLoad(endstone::ChunkLoadEvent &event);
+    void onChunkUnload(endstone::ChunkUnloadEvent &event);
     void onPlayerDropItem(endstone::PlayerDropItemEvent &event);
 
   private:
@@ -42,6 +46,8 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_map<std::string, Id> target_index_;
     std::unordered_map<Id, std::int64_t> hologram_ids_;
     std::unordered_map<Id, OrderBook> hologram_books_;
+    std::unordered_map<Id, HologramAnchor> hologram_anchors_;
+    std::unordered_set<std::string> loaded_chunks_;
     std::unordered_map<std::string, std::string> pending_frame_captures_;
     InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
     std::unordered_set<std::string> open_trade_forms_;
@@ -81,17 +87,25 @@ class ExchangePlugin : public endstone::Plugin {
     void refreshHologram(const Market &market);
     void refreshHologram(const Market &market, const OrderBook &book);
     void sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient = nullptr) const;
+    void queuePlayerHologramSync(endstone::Player &player);
+    void syncHologramsForPlayer(endstone::Player &player) const;
+    void queueLoadedChunkReconcile(std::string dimension_name, int chunk_x, int chunk_z);
+    void reconcileLoadedChunk(std::string_view dimension_name, int chunk_x, int chunk_z);
     void removeHologram(Id market_id);
     void removeAllHolograms();
     [[nodiscard]] endstone::Actor *findActorById(std::int64_t actor_id) const;
     [[nodiscard]] endstone::Actor *findActorByTag(std::string_view tag) const;
     [[nodiscard]] std::optional<endstone::Location> targetLocation(const Market &market) const;
-    [[nodiscard]] std::string hologramText(const Market &market, const OrderBook &book) const;
+    [[nodiscard]] bool isTargetChunkLoaded(const Market &market) const;
+    [[nodiscard]] bool marketTargetsChunk(const Market &market, std::string_view dimension_name, int chunk_x,
+                                          int chunk_z) const;
 
     [[nodiscard]] static std::vector<double> numericFormValues(std::string_view response);
     [[nodiscard]] static std::string formatMoney(Cents cents);
     [[nodiscard]] static std::string targetTag(Id market_id);
     [[nodiscard]] static std::string hologramTag(Id market_id);
+    [[nodiscard]] static std::string chunkKey(std::string_view dimension_name, int chunk_x, int chunk_z);
+    [[nodiscard]] static std::optional<Id> marketIdFromHologramTag(std::string_view tag);
     [[nodiscard]] static bool hasTag(const endstone::Actor &actor, std::string_view tag);
 };
 
