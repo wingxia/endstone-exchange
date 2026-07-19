@@ -118,6 +118,7 @@ void ExchangePlugin::onEnable() {
         registerEvent(&ExchangePlugin::onActorDamage, *this, endstone::EventPriority::Highest, true);
         registerEvent(&ExchangePlugin::onActorRemove, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onPlayerJoin, *this, endstone::EventPriority::Monitor);
+        registerEvent(&ExchangePlugin::onPlayerQuit, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onPlayerMove, *this, endstone::EventPriority::Monitor, true);
         registerEvent(&ExchangePlugin::onChunkLoad, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onChunkUnload, *this, endstone::EventPriority::Monitor);
@@ -167,6 +168,7 @@ void ExchangePlugin::onDisable() {
     hologram_spawn_ready_chunks_.clear();
     interaction_gate_.clear();
     open_trade_forms_.clear();
+    pending_join_hologram_recreates_.clear();
     hologram_snapshot_state_.reset();
     getLogger().info("Endstone Exchange disabled.");
 }
@@ -414,10 +416,17 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
         static_cast<void>(claimDeliveries(player));
         queueInventoryResync(player);
-        queuePlayerHologramSync(player);
+        pending_join_hologram_recreates_.insert(player.getUniqueId().str());
+        queuePlayerHologramSync(player, true);
     } catch (const std::exception &error) {
         getLogger().warning("Join settlement failed for {}: {}", event.getPlayer().getName(), error.what());
     }
+}
+
+void ExchangePlugin::onPlayerQuit(endstone::PlayerQuitEvent &event) {
+    const auto player_uuid = event.getPlayer().getUniqueId().str();
+    open_trade_forms_.erase(player_uuid);
+    pending_join_hologram_recreates_.erase(player_uuid);
 }
 
 void ExchangePlugin::onPlayerMove(endstone::PlayerMoveEvent &event) {
@@ -431,7 +440,8 @@ void ExchangePlugin::onPlayerMove(endstone::PlayerMoveEvent &event) {
         blockToChunk(from.getBlockZ()) == blockToChunk(to.getBlockZ())) {
         return;
     }
-    queuePlayerHologramSync(event.getPlayer());
+    auto &player = event.getPlayer();
+    queuePlayerHologramSync(player, pending_join_hologram_recreates_.contains(player.getUniqueId().str()));
 }
 
 void ExchangePlugin::onChunkLoad(endstone::ChunkLoadEvent &event) {
@@ -1349,23 +1359,57 @@ void ExchangePlugin::sendHologramAppearance(const endstone::Actor &hologram, end
     }
 }
 
-void ExchangePlugin::queuePlayerHologramSync(endstone::Player &player) {
+void ExchangePlugin::queuePlayerHologramSync(endstone::Player &player, const bool recreate_if_pending) {
     const auto player_uuid = player.getUniqueId().str();
     const auto player_name = player.getName();
     for (const auto delay : std::array<std::uint64_t, 4>{1, 20, 60, 120}) {
         static_cast<void>(getServer().getScheduler().runTaskLater(
             *this,
-            [this, player_uuid, player_name] {
+            [this, player_uuid, player_name, recreate_if_pending, delay] {
                 if (!ready_) {
                     return;
                 }
                 auto *current = getServer().getPlayer(player_name);
                 if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                    if (recreate_if_pending && delay >= 60 &&
+                        pending_join_hologram_recreates_.contains(player_uuid) &&
+                        recreateHologramsNearPlayer(*current)) {
+                        pending_join_hologram_recreates_.erase(player_uuid);
+                    }
                     syncHologramsForPlayer(*current);
                 }
             },
             delay));
     }
+}
+
+bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
+    constexpr float AppearanceRangeSquared = 160.0F * 160.0F;
+    std::vector<Id> nearby_markets;
+    for (const auto &[market_id, market] : markets_) {
+        if (!isTargetChunkLoaded(market) || !isTargetChunkSpawnReady(market)) {
+            continue;
+        }
+        const auto location = targetLocation(market);
+        if (!location || location->getDimension().getName() != player.getDimension().getName() ||
+            location->distanceSquared(player.getLocation()) > AppearanceRangeSquared) {
+            continue;
+        }
+        nearby_markets.push_back(market_id);
+    }
+    for (const auto market_id : nearby_markets) {
+        const auto market = markets_.find(market_id);
+        if (market == markets_.end()) {
+            continue;
+        }
+        removeHologram(market_id);
+        if (const auto book = hologram_books_.find(market_id); book != hologram_books_.end()) {
+            refreshHologram(market->second, book->second);
+        } else {
+            refreshHologram(market->second, OrderBook{});
+        }
+    }
+    return !nearby_markets.empty();
 }
 
 void ExchangePlugin::syncHologramsForPlayer(endstone::Player &player) const {

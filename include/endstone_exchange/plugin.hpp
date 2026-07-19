@@ -33,6 +33,7 @@ class ExchangePlugin : public endstone::Plugin {
     void onActorDamage(endstone::ActorDamageEvent &event);
     void onActorRemove(endstone::ActorRemoveEvent &event);
     void onPlayerJoin(endstone::PlayerJoinEvent &event);
+    void onPlayerQuit(endstone::PlayerQuitEvent &event);
     void onPlayerMove(endstone::PlayerMoveEvent &event);
     void onChunkLoad(endstone::ChunkLoadEvent &event);
     void onChunkUnload(endstone::ChunkUnloadEvent &event);
@@ -52,6 +53,7 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_map<std::string, std::string> pending_frame_captures_;
     InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
     std::unordered_set<std::string> open_trade_forms_;
+    std::unordered_set<std::string> pending_join_hologram_recreates_;
     std::shared_ptr<endstone::Task> refresh_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
     bool ready_{false};
@@ -88,8 +90,9 @@ class ExchangePlugin : public endstone::Plugin {
     void refreshHologram(const Market &market);
     void refreshHologram(const Market &market, const OrderBook &book);
     void sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient = nullptr) const;
-    void queuePlayerHologramSync(endstone::Player &player);
+    void queuePlayerHologramSync(endstone::Player &player, bool recreate_if_pending);
     void syncHologramsForPlayer(endstone::Player &player) const;
+    [[nodiscard]] bool recreateHologramsNearPlayer(endstone::Player &player);
     void queueLoadedChunkReconcile(std::string dimension_name, int chunk_x, int chunk_z);
     void reconcileLoadedChunk(std::string_view dimension_name, int chunk_x, int chunk_z);
     void removeHologram(Id market_id);
