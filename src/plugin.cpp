@@ -1390,7 +1390,12 @@ void ExchangePlugin::queuePlayerHologramSync(endstone::Player &player, const boo
 }
 
 bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
-    constexpr float AppearanceRangeSquared = 160.0F * 160.0F;
+    // A server-loaded chunk is not necessarily being tracked by this client yet. Recreating a
+    // label before the client has received the old AddActor packet makes the later RemoveActor
+    // ineffective for that client, so the stale label can reappear after a teleport. Keep the
+    // destructive replacement inside a conservative client-tracking radius; the pending join
+    // repair remains armed and PlayerMove queues it again as the player approaches the market.
+    constexpr float RecreateRangeSquared = 64.0F * 64.0F;
     const auto player_uuid = player.getUniqueId().str();
     const auto loaded_at_join = join_loaded_chunks_.find(player_uuid);
     if (loaded_at_join == join_loaded_chunks_.end()) {
@@ -1403,7 +1408,7 @@ bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
         }
         const auto location = targetLocation(market);
         if (!location || location->getDimension().getName() != player.getDimension().getName() ||
-            location->distanceSquared(player.getLocation()) > AppearanceRangeSquared) {
+            location->distanceSquared(player.getLocation()) > RecreateRangeSquared) {
             continue;
         }
         const auto key = chunkKey(location->getDimension().getName(), blockToChunk(location->getBlockX()),
