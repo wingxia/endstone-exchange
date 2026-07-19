@@ -169,6 +169,8 @@ void ExchangePlugin::onDisable() {
     interaction_gate_.clear();
     open_trade_forms_.clear();
     pending_join_hologram_recreates_.clear();
+    join_loaded_chunks_.clear();
+    pending_hologram_recreates_.clear();
     hologram_snapshot_state_.reset();
     getLogger().info("Endstone Exchange disabled.");
 }
@@ -417,6 +419,7 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
         static_cast<void>(claimDeliveries(player));
         queueInventoryResync(player);
         pending_join_hologram_recreates_.insert(player.getUniqueId().str());
+        join_loaded_chunks_[player.getUniqueId().str()] = loaded_chunks_;
         queuePlayerHologramSync(player, true);
     } catch (const std::exception &error) {
         getLogger().warning("Join settlement failed for {}: {}", event.getPlayer().getName(), error.what());
@@ -427,6 +430,7 @@ void ExchangePlugin::onPlayerQuit(endstone::PlayerQuitEvent &event) {
     const auto player_uuid = event.getPlayer().getUniqueId().str();
     open_trade_forms_.erase(player_uuid);
     pending_join_hologram_recreates_.erase(player_uuid);
+    join_loaded_chunks_.erase(player_uuid);
 }
 
 void ExchangePlugin::onPlayerMove(endstone::PlayerMoveEvent &event) {
@@ -783,6 +787,7 @@ void ExchangePlugin::restoreMarkets() {
     hologram_anchors_.clear();
     loaded_chunks_.clear();
     hologram_spawn_ready_chunks_.clear();
+    pending_hologram_recreates_.clear();
     // Keep the snapshot state created by onEnable(). Resetting it here disables both the
     // initial asynchronous order-book query and every periodic hologram refresh afterwards.
     if (const auto *level = getServer().getLevel(); level != nullptr) {
@@ -1321,7 +1326,7 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
         }
     }
     if (hologram == nullptr) {
-        if (!isTargetChunkSpawnReady(market)) {
+        if (!isTargetChunkSpawnReady(market) || pending_hologram_recreates_.contains(market.id)) {
             return;
         }
         hologram = hologram_location.getDimension().spawnActor(hologram_location, "minecraft:armor_stand");
@@ -1375,6 +1380,7 @@ void ExchangePlugin::queuePlayerHologramSync(endstone::Player &player, const boo
                         pending_join_hologram_recreates_.contains(player_uuid) &&
                         recreateHologramsNearPlayer(*current)) {
                         pending_join_hologram_recreates_.erase(player_uuid);
+                        join_loaded_chunks_.erase(player_uuid);
                     }
                     syncHologramsForPlayer(*current);
                 }
@@ -1385,6 +1391,11 @@ void ExchangePlugin::queuePlayerHologramSync(endstone::Player &player, const boo
 
 bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
     constexpr float AppearanceRangeSquared = 160.0F * 160.0F;
+    const auto player_uuid = player.getUniqueId().str();
+    const auto loaded_at_join = join_loaded_chunks_.find(player_uuid);
+    if (loaded_at_join == join_loaded_chunks_.end()) {
+        return false;
+    }
     std::vector<Id> nearby_markets;
     for (const auto &[market_id, market] : markets_) {
         if (!isTargetChunkLoaded(market) || !isTargetChunkSpawnReady(market)) {
@@ -1395,19 +1406,37 @@ bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
             location->distanceSquared(player.getLocation()) > AppearanceRangeSquared) {
             continue;
         }
+        const auto key = chunkKey(location->getDimension().getName(), blockToChunk(location->getBlockX()),
+                                  blockToChunk(location->getBlockZ()));
+        if (!loaded_at_join->second.contains(key)) {
+            continue;
+        }
         nearby_markets.push_back(market_id);
     }
     for (const auto market_id : nearby_markets) {
-        const auto market = markets_.find(market_id);
-        if (market == markets_.end()) {
+        if (!pending_hologram_recreates_.insert(market_id).second) {
             continue;
         }
         removeHologram(market_id);
-        if (const auto book = hologram_books_.find(market_id); book != hologram_books_.end()) {
-            refreshHologram(market->second, book->second);
-        } else {
-            refreshHologram(market->second, OrderBook{});
-        }
+        static_cast<void>(getServer().getScheduler().runTaskLater(
+            *this,
+            [this, market_id] {
+                pending_hologram_recreates_.erase(market_id);
+                if (!ready_) {
+                    return;
+                }
+                const auto market = markets_.find(market_id);
+                if (market == markets_.end() || !isTargetChunkLoaded(market->second) ||
+                    !isTargetChunkSpawnReady(market->second)) {
+                    return;
+                }
+                if (const auto book = hologram_books_.find(market_id); book != hologram_books_.end()) {
+                    refreshHologram(market->second, book->second);
+                } else {
+                    refreshHologram(market->second, OrderBook{});
+                }
+            },
+            5));
     }
     return !nearby_markets.empty();
 }

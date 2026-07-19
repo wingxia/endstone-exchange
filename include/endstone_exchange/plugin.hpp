@@ -54,6 +54,8 @@ class ExchangePlugin : public endstone::Plugin {
     InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
     std::unordered_set<std::string> open_trade_forms_;
     std::unordered_set<std::string> pending_join_hologram_recreates_;
+    std::unordered_map<std::string, std::unordered_set<std::string>> join_loaded_chunks_;
+    std::unordered_set<Id> pending_hologram_recreates_;
     std::shared_ptr<endstone::Task> refresh_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
     bool ready_{false};
