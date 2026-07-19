@@ -164,6 +164,7 @@ void ExchangePlugin::onDisable() {
     hologram_books_.clear();
     hologram_anchors_.clear();
     loaded_chunks_.clear();
+    hologram_spawn_ready_chunks_.clear();
     interaction_gate_.clear();
     open_trade_forms_.clear();
     hologram_snapshot_state_.reset();
@@ -439,13 +440,17 @@ void ExchangePlugin::onChunkLoad(endstone::ChunkLoadEvent &event) {
     }
     auto &chunk = event.getChunk();
     const auto dimension_name = chunk.getDimension().getName();
-    loaded_chunks_.insert(chunkKey(dimension_name, chunk.getX(), chunk.getZ()));
+    const auto key = chunkKey(dimension_name, chunk.getX(), chunk.getZ());
+    loaded_chunks_.insert(key);
+    hologram_spawn_ready_chunks_.erase(key);
     queueLoadedChunkReconcile(dimension_name, chunk.getX(), chunk.getZ());
 }
 
 void ExchangePlugin::onChunkUnload(endstone::ChunkUnloadEvent &event) {
     auto &chunk = event.getChunk();
-    loaded_chunks_.erase(chunkKey(chunk.getDimension().getName(), chunk.getX(), chunk.getZ()));
+    const auto key = chunkKey(chunk.getDimension().getName(), chunk.getX(), chunk.getZ());
+    loaded_chunks_.erase(key);
+    hologram_spawn_ready_chunks_.erase(key);
 }
 
 void ExchangePlugin::onPlayerDropItem(endstone::PlayerDropItemEvent &event) {
@@ -767,6 +772,7 @@ void ExchangePlugin::restoreMarkets() {
     hologram_books_.clear();
     hologram_anchors_.clear();
     loaded_chunks_.clear();
+    hologram_spawn_ready_chunks_.clear();
     // Keep the snapshot state created by onEnable(). Resetting it here disables both the
     // initial asynchronous order-book query and every periodic hologram refresh afterwards.
     if (const auto *level = getServer().getLevel(); level != nullptr) {
@@ -777,6 +783,7 @@ void ExchangePlugin::restoreMarkets() {
             for (auto &chunk : dimension->getLoadedChunks()) {
                 if (chunk != nullptr) {
                     loaded_chunks_.insert(chunkKey(dimension->getName(), chunk->getX(), chunk->getZ()));
+                    queueLoadedChunkReconcile(dimension->getName(), chunk->getX(), chunk->getZ());
                 }
             }
         }
@@ -1304,6 +1311,9 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
         }
     }
     if (hologram == nullptr) {
+        if (!isTargetChunkSpawnReady(market)) {
+            return;
+        }
         hologram = hologram_location.getDimension().spawnActor(hologram_location, "minecraft:armor_stand");
         if (hologram == nullptr) {
             return;
@@ -1378,16 +1388,24 @@ void ExchangePlugin::syncHologramsForPlayer(endstone::Player &player) const {
 }
 
 void ExchangePlugin::queueLoadedChunkReconcile(std::string dimension_name, const int chunk_x, const int chunk_z) {
-    for (const auto delay : std::array<std::uint64_t, 2>{2, 20}) {
-        static_cast<void>(getServer().getScheduler().runTaskLater(
-            *this,
-            [this, dimension_name, chunk_x, chunk_z] {
-                if (ready_ && loaded_chunks_.contains(chunkKey(dimension_name, chunk_x, chunk_z))) {
-                    reconcileLoadedChunk(dimension_name, chunk_x, chunk_z);
-                }
-            },
-            delay));
-    }
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, dimension_name, chunk_x, chunk_z] {
+            if (ready_ && loaded_chunks_.contains(chunkKey(dimension_name, chunk_x, chunk_z))) {
+                reconcileLoadedChunk(dimension_name, chunk_x, chunk_z);
+            }
+        },
+        2));
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, dimension_name, chunk_x, chunk_z] {
+            const auto key = chunkKey(dimension_name, chunk_x, chunk_z);
+            if (ready_ && loaded_chunks_.contains(key)) {
+                hologram_spawn_ready_chunks_.insert(key);
+                reconcileLoadedChunk(dimension_name, chunk_x, chunk_z);
+            }
+        },
+        20));
 }
 
 void ExchangePlugin::reconcileLoadedChunk(const std::string_view dimension_name, const int chunk_x,
@@ -1527,6 +1545,18 @@ bool ExchangePlugin::isTargetChunkLoaded(const Market &market) const {
     }
     const auto location = targetLocation(market);
     return location && loaded_chunks_.contains(
+                           chunkKey(location->getDimension().getName(), blockToChunk(location->getBlockX()),
+                                    blockToChunk(location->getBlockZ())));
+}
+
+bool ExchangePlugin::isTargetChunkSpawnReady(const Market &market) const {
+    if (market.target_kind == TargetKind::Block) {
+        return market.block_x && market.block_z &&
+               hologram_spawn_ready_chunks_.contains(chunkKey(
+                   market.dimension_name, blockToChunk(*market.block_x), blockToChunk(*market.block_z)));
+    }
+    const auto location = targetLocation(market);
+    return location && hologram_spawn_ready_chunks_.contains(
                            chunkKey(location->getDimension().getName(), blockToChunk(location->getBlockX()),
                                     blockToChunk(location->getBlockZ())));
 }

@@ -47,7 +47,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 
 - Periodic label reads are one asynchronous batch snapshot, not three queries per market on the server thread.
 - A form submission closes first and executes one tick later. After settlement, the authoritative main inventory and offhand are resent one tick later so transient escrow markers cannot leave a stale client-held item.
-- Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning; chunk reconciliation removes stale duplicates and reconnect retries restore client metadata after `AddActor` arrives.
+- Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning, a 20-tick grace period lets persisted actors return before any replacement is created, chunk reconciliation removes stale duplicates, and reconnect retries restore client metadata after `AddActor` arrives.
 - The Endstone thread only applies a completed snapshot to actors.
 - Connection, read and write operations have bounded timeouts.
 - Matching transactions lock only the submitted physical market, account and open-order rows for its shared item book.

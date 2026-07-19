@@ -48,6 +48,7 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_map<Id, OrderBook> hologram_books_;
     std::unordered_map<Id, HologramAnchor> hologram_anchors_;
     std::unordered_set<std::string> loaded_chunks_;
+    std::unordered_set<std::string> hologram_spawn_ready_chunks_;
     std::unordered_map<std::string, std::string> pending_frame_captures_;
     InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
     std::unordered_set<std::string> open_trade_forms_;
@@ -97,6 +98,7 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] endstone::Actor *findActorByTag(std::string_view tag) const;
     [[nodiscard]] std::optional<endstone::Location> targetLocation(const Market &market) const;
     [[nodiscard]] bool isTargetChunkLoaded(const Market &market) const;
+    [[nodiscard]] bool isTargetChunkSpawnReady(const Market &market) const;
     [[nodiscard]] bool marketTargetsChunk(const Market &market, std::string_view dimension_name, int chunk_x,
                                           int chunk_z) const;
 
