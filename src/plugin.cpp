@@ -462,7 +462,22 @@ void ExchangePlugin::onChunkLoad(endstone::ChunkLoadEvent &event) {
 
 void ExchangePlugin::onChunkUnload(endstone::ChunkUnloadEvent &event) {
     auto &chunk = event.getChunk();
-    const auto key = chunkKey(chunk.getDimension().getName(), chunk.getX(), chunk.getZ());
+    const auto dimension_name = chunk.getDimension().getName();
+    std::vector<Id> unloading_holograms;
+    for (const auto &[market_id, market] : markets_) {
+        if (marketTargetsChunk(market, dimension_name, chunk.getX(), chunk.getZ())) {
+            unloading_holograms.push_back(market_id);
+        }
+    }
+    // Holograms are runtime presentation state, not world data. Removing them before the
+    // chunk is saved prevents old armor stands from being persisted and replayed alongside
+    // the fresh label that will be created after the next ChunkLoadEvent grace period.
+    for (const auto market_id : unloading_holograms) {
+        pending_hologram_recreates_.erase(market_id);
+        removeHologram(market_id);
+    }
+
+    const auto key = chunkKey(dimension_name, chunk.getX(), chunk.getZ());
     loaded_chunks_.erase(key);
     hologram_spawn_ready_chunks_.erase(key);
 }
