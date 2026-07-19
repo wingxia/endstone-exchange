@@ -29,6 +29,7 @@ void clearDeliveryClaimTag(endstone::Inventory &inventory, Id claim_id, const It
 [[nodiscard]] std::optional<Id> sellItemEscrowId(const endstone::ItemStack &item);
 [[nodiscard]] std::optional<Id> sellReceiptEscrowId(const endstone::ItemStack &item);
 [[nodiscard]] bool isInternalEscrowItem(const endstone::ItemStack &item);
+[[nodiscard]] int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemPrototype &prototype);
 [[nodiscard]] TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,
                                            int requested_quantity, Id escrow_id);
 [[nodiscard]] TaggedSellItems taggedSellItems(const endstone::PlayerInventory &inventory, Id escrow_id);

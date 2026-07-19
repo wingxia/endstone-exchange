@@ -1,6 +1,7 @@
 #include "endstone_exchange/config.hpp"
 #include "endstone_exchange/database.hpp"
 #include "endstone_exchange/exchange_service.hpp"
+#include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
@@ -8,6 +9,7 @@
 #include "endstone_exchange/structure_reader.hpp"
 
 #include <barrier>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -109,6 +111,54 @@ void testInteractionGate() {
     require(gate.accept("other-player", start + 1ms), "players must have independent interaction gates");
     gate.clear();
     require(gate.accept("player", start + 751ms), "clearing plugin state must release the gate");
+}
+
+std::uint64_t readVarUint(const std::string_view payload, std::size_t &offset) {
+    std::uint64_t value = 0;
+    unsigned shift = 0;
+    while (offset < payload.size() && shift < 64) {
+        const auto byte = static_cast<std::uint8_t>(payload[offset++]);
+        value |= static_cast<std::uint64_t>(byte & 0x7fU) << shift;
+        if ((byte & 0x80U) == 0) {
+            return value;
+        }
+        shift += 7;
+    }
+    throw std::runtime_error("invalid test varuint");
+}
+
+float readLittleFloat(const std::string_view payload, std::size_t &offset) {
+    if (payload.size() - offset < sizeof(std::uint32_t)) {
+        throw std::runtime_error("truncated test float");
+    }
+    std::uint32_t bits = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        bits |= static_cast<std::uint32_t>(static_cast<std::uint8_t>(payload[offset++])) << shift;
+    }
+    return std::bit_cast<float>(bits);
+}
+
+void testHologramAppearancePacket() {
+    const auto payload = exchange::hologramAppearancePacket(300);
+    std::size_t offset = 0;
+    require(readVarUint(payload, offset) == 300, "hologram packet runtime id");
+    require(readVarUint(payload, offset) == 4, "hologram packet metadata count");
+
+    require(readVarUint(payload, offset) == 38 && readVarUint(payload, offset) == 3,
+            "hologram packet scale metadata header");
+    require(readLittleFloat(payload, offset) == 0.01F, "hologram actor must be client-side tiny");
+    require(readVarUint(payload, offset) == 53 && readVarUint(payload, offset) == 3 &&
+                readLittleFloat(payload, offset) == 0.0F,
+            "hologram packet zero width");
+    require(readVarUint(payload, offset) == 54 && readVarUint(payload, offset) == 3 &&
+                readLittleFloat(payload, offset) == 0.0F,
+            "hologram packet zero height");
+    require(readVarUint(payload, offset) == 81 && readVarUint(payload, offset) == 0 &&
+                static_cast<std::uint8_t>(payload.at(offset++)) == 1,
+            "hologram packet always-visible nametag");
+    require(readVarUint(payload, offset) == 0 && readVarUint(payload, offset) == 0 &&
+                readVarUint(payload, offset) == 0 && offset == payload.size(),
+            "hologram packet empty properties and tick");
 }
 
 void testCanonicalItemIdentity() {
@@ -792,6 +842,7 @@ int main() {
         testConfig();
         testPriceSliderWindow();
         testInteractionGate();
+        testHologramAppearancePacket();
         testCanonicalItemIdentity();
         testLevelDbStructureCapture();
         testLiveLevelDbStructureCapture();

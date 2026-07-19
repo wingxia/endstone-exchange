@@ -66,18 +66,21 @@ class ExchangePlugin : public endstone::Plugin {
     void unindexMarket(Id market_id);
     void restoreMarkets();
 
+    void queueTradeForm(endstone::Player &player, Id market_id);
     void openTradeForm(endstone::Player &player, Id market_id);
     void submitTradeForm(endstone::Player &player, Id market_id, const PriceSliderWindow &price_window,
                          std::string_view response);
     void openOrdersForm(endstone::Player &player);
     [[nodiscard]] ExecutionResult submitSellEscrow(endstone::Player &player, const OrderRequest &request);
     void reconcileSellEscrows(endstone::Player &player);
-    void claimDeliveries(endstone::Player &player);
+    [[nodiscard]] int claimDeliveries(endstone::Player &player, bool announce = true);
+    void queueInventoryResync(endstone::Player &player);
     void giveExchanger(endstone::Player &player);
 
     void refreshHolograms();
     void refreshHologram(const Market &market);
     void refreshHologram(const Market &market, const OrderBook &book);
+    void sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient = nullptr) const;
     void removeHologram(Id market_id);
     void removeAllHolograms();
     [[nodiscard]] endstone::Actor *findActorById(std::int64_t actor_id) const;

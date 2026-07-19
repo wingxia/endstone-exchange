@@ -1,5 +1,6 @@
 #include "endstone_exchange/plugin.hpp"
 
+#include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/inventory_escrow.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
@@ -233,7 +234,8 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
                 sender.sendErrorMessage("只有玩家可以领取物品。");
                 return true;
             }
-            claimDeliveries(*player);
+            static_cast<void>(claimDeliveries(*player));
+            queueInventoryResync(*player);
             return true;
         }
         if (subcommand == "addbalance") {
@@ -304,7 +306,7 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
         return;
     }
     event.cancel();
-    openTradeForm(player, market->second);
+    queueTradeForm(player, market->second);
 }
 
 void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &event) {
@@ -338,7 +340,7 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
         return;
     }
     event.cancel();
-    openTradeForm(player, *market_id);
+    queueTradeForm(player, *market_id);
 }
 
 void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
@@ -396,7 +398,14 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
         auto &player = event.getPlayer();
         open_trade_forms_.erase(player.getUniqueId().str());
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
-        claimDeliveries(player);
+        static_cast<void>(claimDeliveries(player));
+        queueInventoryResync(player);
+        for (const auto &[market_id, actor_id] : hologram_ids_) {
+            static_cast<void>(market_id);
+            if (const auto *hologram = findActorById(actor_id); hologram != nullptr) {
+                sendHologramAppearance(*hologram, &player);
+            }
+        }
     } catch (const std::exception &error) {
         getLogger().warning("Join settlement failed for {}: {}", event.getPlayer().getName(), error.what());
     }
@@ -740,6 +749,23 @@ void ExchangePlugin::restoreMarkets() {
     refreshHolograms();
 }
 
+void ExchangePlugin::queueTradeForm(endstone::Player &player, const Id market_id) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name, market_id] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                openTradeForm(*current, market_id);
+            }
+        },
+        1));
+}
+
 void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id) {
     const auto player_uuid = player.getUniqueId().str();
     if (!open_trade_forms_.insert(player_uuid).second) {
@@ -753,9 +779,11 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
             return;
         }
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
-        claimDeliveries(player);
+        static_cast<void>(claimDeliveries(player));
+        queueInventoryResync(player);
         const auto book = service_->orderBook(market_id, config_.market.order_book_depth);
         const auto account_balance = service_->balance(player.getUniqueId().str());
+        const auto sellable_quantity = sellableItemCount(player.getInventory(), market_it->second.item);
 
         std::string book_text = "§a买盘（价格 × 数量）§r\n";
         if (book.bids.empty()) {
@@ -791,6 +819,9 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
             .addControl(endstone::Header("盘口"))
             .addControl(endstone::Label(book_text))
             .addControl(endstone::Label("§6余额：§e" + formatMoney(account_balance) + "§r"))
+            .addControl(endstone::Label(std::format(
+                "§6服务器已识别可卖：§e{} 件§r（名称、附魔、耐久及其他 NBT 必须与市场物品完全一致）",
+                sellable_quantity)))
             .addControl(endstone::Divider())
             .addControl(
                 endstone::Dropdown("交易方式", {"限价买入", "限价卖出", "直接买入（吃卖盘）", "直接卖出（吃买盘）"}, 0))
@@ -804,8 +835,20 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
                                                                      std::string response) {
                 open_trade_forms_.erase(player_uuid);
                 if (form_player != nullptr && ready_) {
+                    const auto player_name = form_player->getName();
                     form_player->closeForm();
-                    submitTradeForm(*form_player, market_id, price_window, response);
+                    static_cast<void>(getServer().getScheduler().runTaskLater(
+                        *this,
+                        [this, market_id, price_window, player_uuid, player_name, response = std::move(response)] {
+                            if (!ready_) {
+                                return;
+                            }
+                            auto *current = getServer().getPlayer(player_name);
+                            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                                submitTradeForm(*current, market_id, price_window, response);
+                            }
+                        },
+                        1));
                 }
             });
         player.sendForm(std::move(form));
@@ -857,13 +900,51 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
         request.quantity = quantity;
         const auto result =
             request.side == Side::Sell ? submitSellEscrow(player, request) : service_->placeOrder(request);
-        claimDeliveries(player);
+        int delivered_items = 0;
+        bool delivery_pending = false;
+        try {
+            delivered_items = claimDeliveries(player, false);
+        } catch (const std::exception &delivery_error) {
+            delivery_pending = true;
+            getLogger().warning("Post-trade delivery remains pending for {} after order {}: {}", player.getName(),
+                                result.order_id, delivery_error.what());
+        }
         refreshHologram(market_it->second);
-        player.sendMessage("§a交易已提交：成交 {}，挂单 {}，成交额 {}，余额 {}。§r", result.filled_quantity,
-                           result.open_quantity, formatMoney(result.gross_cents), formatMoney(result.balance_cents));
+        std::string delivery_note;
+        if (delivered_items > 0) {
+            delivery_note = request.side == Side::Buy ? std::format("，已到账 {} 件", delivered_items)
+                                                      : std::format("，已返还 {} 件", delivered_items);
+        }
+        if (delivery_pending) {
+            delivery_note += "，另有物品待 /exchange claim 领取";
+        }
+
+        if (result.filled_quantity == 0 && result.open_quantity == 0) {
+            player.sendMessage(
+                "§e市价单 #{} 未成交：当前没有其他玩家的可成交挂单；自己的订单不会自成交{}。余额 {}。§r",
+                result.order_id, delivery_note, formatMoney(result.balance_cents));
+        } else if (result.filled_quantity == 0) {
+            player.sendMessage("§a限价单 #{} 已进入盘口：{} 件 @ {}，等待其他玩家成交{}。余额 {}。§r",
+                               result.order_id, result.open_quantity, formatMoney(request.price_cents), delivery_note,
+                               formatMoney(result.balance_cents));
+        } else if (result.open_quantity > 0) {
+            player.sendMessage("§a订单 #{} 部分成交：成交 {} 件，剩余 {} 件继续挂单，成交额 {}{}。余额 {}。§r",
+                               result.order_id, result.filled_quantity, result.open_quantity,
+                               formatMoney(result.gross_cents), delivery_note, formatMoney(result.balance_cents));
+        } else if (result.filled_quantity == result.requested_quantity) {
+            player.sendMessage("§a订单 #{} 已全部成交：{} 件，成交额 {}{}。余额 {}。§r", result.order_id,
+                               result.filled_quantity, formatMoney(result.gross_cents), delivery_note,
+                               formatMoney(result.balance_cents));
+        } else {
+            player.sendMessage("§a市价单 #{} 已结束：成交 {}/{} 件，成交额 {}{}。余额 {}。§r", result.order_id,
+                               result.filled_quantity, result.requested_quantity, formatMoney(result.gross_cents),
+                               delivery_note, formatMoney(result.balance_cents));
+        }
+        queueInventoryResync(player);
     } catch (const std::exception &error) {
         player.sendErrorMessage("交易失败：{}", error.what());
         getLogger().warning("Trade submission failed for {}: {}", player.getName(), error.what());
+        queueInventoryResync(player);
     }
 }
 
@@ -945,7 +1026,8 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player) {
                 }
                 try {
                     service_->cancelOrder(order_id, player_uuid);
-                    claimDeliveries(*form_player);
+                    static_cast<void>(claimDeliveries(*form_player));
+                    queueInventoryResync(*form_player);
                     refreshHolograms();
                     form_player->sendMessage("§a挂单 #{} 已撤销。§r", order_id);
                 } catch (const std::exception &error) {
@@ -959,7 +1041,7 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player) {
     }
 }
 
-void ExchangePlugin::claimDeliveries(endstone::Player &player) {
+int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announce) {
     reconcileSellEscrows(player);
     const auto player_uuid = player.getUniqueId().str();
     auto &inventory = player.getInventory();
@@ -1003,9 +1085,32 @@ void ExchangePlugin::claimDeliveries(endstone::Player &player) {
             break;
         }
     }
-    if (delivered_total > 0) {
+    if (announce && delivered_total > 0) {
         player.sendMessage("§a已从交易所领取 {} 件物品。§r", delivered_total);
     }
+    return delivered_total;
+}
+
+void ExchangePlugin::queueInventoryResync(endstone::Player &player) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current == nullptr || current->getUniqueId().str() != player_uuid) {
+                return;
+            }
+            auto &inventory = current->getInventory();
+            auto contents = inventory.getContents();
+            auto offhand = inventory.getItemInOffHand();
+            inventory.setContents(std::move(contents));
+            inventory.setItemInOffHand(std::move(offhand));
+        },
+        1));
 }
 
 void ExchangePlugin::giveExchanger(endstone::Player &player) {
@@ -1119,7 +1224,8 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
         return;
     }
     auto hologram_location = *location;
-    hologram_location.setY(hologram_location.getY() + 0.25F);
+    hologram_location.setY(hologram_location.getY() +
+                           (market.target_kind == TargetKind::Block ? 0.65F : 2.25F));
     endstone::Actor *hologram = nullptr;
     const auto tag = hologramTag(market.id);
     const auto remembered = hologram_ids_.find(market.id);
@@ -1150,14 +1256,26 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
             return;
         }
         static_cast<void>(hologram->addScoreboardTag(tag));
-        const auto command = std::format("effect @e[tag={},c=1] invisibility infinite 0 true", tag);
-        static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(), command));
     }
     hologram_ids_[market.id] = hologram->getId();
     static_cast<void>(hologram->teleport(hologram_location));
     hologram->setNameTag(hologramText(market, book));
     hologram->setNameTagVisible(true);
     hologram->setNameTagAlwaysVisible(true);
+    sendHologramAppearance(*hologram);
+}
+
+void ExchangePlugin::sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient) const {
+    const auto payload = hologramAppearancePacket(hologram.getRuntimeId());
+    if (recipient != nullptr) {
+        recipient->sendPacket(SetActorDataPacketId, payload);
+        return;
+    }
+    for (auto *player : getServer().getOnlinePlayers()) {
+        if (player != nullptr) {
+            player->sendPacket(SetActorDataPacketId, payload);
+        }
+    }
 }
 
 void ExchangePlugin::removeHologram(const Id market_id) {

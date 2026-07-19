@@ -10,7 +10,7 @@ This implementation is pinned to the latest verified stable release, Endstone v0
 | Read/write player inventory | `PlayerInventory`, slot access, offhand access and `addItem` | Public API; exact identity is compared from type, data value and NBT instead of runtime `ItemMeta::isSimilar` state |
 | Preserve custom item data | `ItemStack::getNbt()` / `setNbt()` | Public API plus a deterministic plugin-side codec for SQL storage |
 | Trading UI | `ModalForm`, `Header`, `Label`, `Divider`, `Dropdown`, and `Slider` | Public API |
-| Floating order-book text | `Dimension::spawnActor`, `Actor::setNameTag*`, scheduler | Invisible, protected armor-stand hologram |
+| Floating order-book text | `Dimension::spawnActor`, `Actor::setNameTag*`, `Player::sendPacket`, scheduler | Protected armor-stand nameplate with a narrow `SetActorData` appearance packet (`scale=0.01`, zero client collision box); avoids Bedrock hiding the nameplate together with invisibility |
 | Persistent targets | Block coordinates or persistent scoreboard tags on actors | Public API + MySQL |
 | Read an item frame's displayed item | Not exposed by `Block`/`BlockState` | Public `Server::dispatchCommand()` saves a namespaced structure; after an asynchronous 80-tick delay the plugin reads that structure's BlockActor NBT from the world LevelDB log, then deletes the capture |
 

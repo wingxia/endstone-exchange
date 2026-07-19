@@ -129,6 +129,26 @@ bool isInternalEscrowItem(const endstone::ItemStack &item) {
            sellReceiptEscrowId(item).has_value();
 }
 
+int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemPrototype &prototype) {
+    int available = 0;
+    const auto count = [&](const endstone::ItemStack &item) {
+        if (!isInternalEscrowItem(item) &&
+            matchesItemIdentity(prototype, static_cast<std::string>(item.getType().getId()), item.getData(),
+                                item.getNbt())) {
+            available += item.getAmount();
+        }
+    };
+    for (const auto &item : inventory.getContents()) {
+        if (item) {
+            count(*item);
+        }
+    }
+    if (const auto offhand = inventory.getItemInOffHand()) {
+        count(*offhand);
+    }
+    return available;
+}
+
 TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,
                              const int requested_quantity, const Id escrow_id) {
     if (requested_quantity <= 0) {
