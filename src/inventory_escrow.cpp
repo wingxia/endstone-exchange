@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -95,24 +96,50 @@ std::optional<Id> deliveryClaimId(const endstone::ItemStack &item) {
     return markerId(item, DeliveryClaimTag);
 }
 
-int taggedItemCount(const endstone::Inventory &inventory, const Id claim_id) {
+bool clearDeliveryClaimTag(endstone::ItemStack &item, const Id claim_id, const ItemPrototype &prototype) {
+    if (deliveryClaimId(item) != claim_id) {
+        return false;
+    }
+    item.setNbt(originalNbt(prototype));
+    return !deliveryClaimId(item).has_value();
+}
+
+int taggedItemCount(const endstone::PlayerInventory &inventory, const Id claim_id) {
     int result = 0;
     for (const auto &item : inventory.getContents()) {
         if (item && deliveryClaimId(*item) == claim_id) {
             result += item->getAmount();
         }
     }
+    if (const auto item = inventory.getItemInOffHand(); item && deliveryClaimId(*item) == claim_id) {
+        result += item->getAmount();
+    }
     return result;
 }
 
-void clearDeliveryClaimTag(endstone::Inventory &inventory, const Id claim_id, const ItemPrototype &prototype) {
-    const auto nbt = originalNbt(prototype);
+void clearDeliveryClaimTag(endstone::PlayerInventory &inventory, const Id claim_id,
+                           const ItemPrototype &prototype) {
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         auto item = inventory.getItem(slot);
-        if (item && deliveryClaimId(*item) == claim_id) {
-            item->setNbt(nbt);
+        if (item && clearDeliveryClaimTag(*item, claim_id, prototype)) {
             inventory.setItem(slot, std::move(item));
         }
+    }
+    auto offhand = inventory.getItemInOffHand();
+    if (offhand && clearDeliveryClaimTag(*offhand, claim_id, prototype)) {
+        inventory.setItemInOffHand(std::move(*offhand));
+    }
+}
+
+void removeDeliveryClaimItems(endstone::PlayerInventory &inventory, const Id claim_id) {
+    for (int slot = 0; slot < inventory.getSize(); ++slot) {
+        const auto item = inventory.getItem(slot);
+        if (item && deliveryClaimId(*item) == claim_id) {
+            inventory.clear(slot);
+        }
+    }
+    if (const auto item = inventory.getItemInOffHand(); item && deliveryClaimId(*item) == claim_id) {
+        inventory.setItemInOffHand(std::nullopt);
     }
 }
 
@@ -127,6 +154,34 @@ std::optional<Id> sellReceiptEscrowId(const endstone::ItemStack &item) {
 bool isInternalEscrowItem(const endstone::ItemStack &item) {
     return deliveryClaimId(item).has_value() || sellItemEscrowId(item).has_value() ||
            sellReceiptEscrowId(item).has_value();
+}
+
+InternalEscrowMarkers internalEscrowMarkers(const endstone::PlayerInventory &inventory) {
+    std::set<Id> delivery_claim_ids;
+    std::set<Id> sell_item_escrow_ids;
+    std::set<Id> sell_receipt_escrow_ids;
+    const auto collect = [&](const endstone::ItemStack &item) {
+        if (const auto id = deliveryClaimId(item)) {
+            delivery_claim_ids.insert(*id);
+        }
+        if (const auto id = sellItemEscrowId(item)) {
+            sell_item_escrow_ids.insert(*id);
+        }
+        if (const auto id = sellReceiptEscrowId(item)) {
+            sell_receipt_escrow_ids.insert(*id);
+        }
+    };
+    for (const auto &item : inventory.getContents()) {
+        if (item) {
+            collect(*item);
+        }
+    }
+    if (const auto offhand = inventory.getItemInOffHand()) {
+        collect(*offhand);
+    }
+    return {{delivery_claim_ids.begin(), delivery_claim_ids.end()},
+            {sell_item_escrow_ids.begin(), sell_item_escrow_ids.end()},
+            {sell_receipt_escrow_ids.begin(), sell_receipt_escrow_ids.end()}};
 }
 
 int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemPrototype &prototype) {
@@ -232,6 +287,18 @@ void restoreTaggedSellItems(endstone::PlayerInventory &inventory, const Id escro
     if (offhand && sellItemEscrowId(*offhand) == escrow_id) {
         offhand->setNbt(nbt);
         inventory.setItemInOffHand(std::move(*offhand));
+    }
+}
+
+void removeTaggedSellItems(endstone::PlayerInventory &inventory, const Id escrow_id) {
+    for (int slot = 0; slot < inventory.getSize(); ++slot) {
+        const auto item = inventory.getItem(slot);
+        if (item && sellItemEscrowId(*item) == escrow_id) {
+            inventory.clear(slot);
+        }
+    }
+    if (const auto item = inventory.getItemInOffHand(); item && sellItemEscrowId(*item) == escrow_id) {
+        inventory.setItemInOffHand(std::nullopt);
     }
 }
 

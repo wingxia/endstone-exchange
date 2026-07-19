@@ -9,6 +9,7 @@
 #include "endstone_exchange/price_window.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 
+#include <algorithm>
 #include <barrier>
 #include <bit>
 #include <chrono>
@@ -76,13 +77,24 @@ void testConfig() {
     auto config = exchange::Config::load(path);
     require(config.database.host == "127.0.0.1", "template host");
     require(config.market.initial_balance_cents == 1'000'000, "money parsing");
-    require(config.market.price_step_cents == 1, "cent step parsing");
+    require(config.market.max_order_quantity == 640, "default maximum order quantity");
+    require(config.market.price_min_cents == 100 && config.market.price_max_cents == 500'000 &&
+                config.market.price_step_cents == 100,
+            "whole-u price range parsing");
     require(config.market.frame_capture_delay_ticks == 80, "item-frame capture delay");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
 
 void testPriceSliderWindow() {
+    const auto whole_units = exchange::makePriceSliderWindow(100, 500'000, 100, 1000);
+    require(whole_units.max_index == 4'999 && whole_units.default_index == 9 &&
+                whole_units.priceAt(0) == 100 && whole_units.priceAt(whole_units.max_index) == 500'000,
+            "default slider must cover every whole-u price from 1 through 5000");
+    require(whole_units.priceFromDisplayedUnits(1) == 100 &&
+                whole_units.priceFromDisplayedUnits(5000) == 500'000,
+            "displayed whole-u slider values must map directly to cents");
+
     const auto near_max = exchange::makePriceSliderWindow(1, 100'000'000, 1, 100'000'000);
     require(near_max.max_index == 10'000 && near_max.default_index == 10'000,
             "large prices must use a float-safe integer slider window");
@@ -99,6 +111,16 @@ void testPriceSliderWindow() {
         invalid_rejected = true;
     }
     require(invalid_rejected, "price slider must reject out-of-window client values");
+    invalid_rejected = false;
+    std::string invalid_price_message;
+    try {
+        static_cast<void>(whole_units.priceFromDisplayedUnits(5000.5));
+    } catch (const std::exception &error) {
+        invalid_rejected = true;
+        invalid_price_message = error.what();
+    }
+    require(invalid_rejected && invalid_price_message == "价格超出允许范围，或不是整数",
+            "whole-u slider must reject forged prices with a player-facing Chinese error");
 }
 
 void testInteractionGate() {
@@ -174,9 +196,11 @@ void testMarketDisplay() {
     book.bids.push_back({1000, 5});
     book.asks.push_back({1200, 3});
     const auto text = exchange::marketHologramText(market, book);
-    require(text.find("收购 10.00 × 5") != std::string::npos &&
-                text.find("出售 12.00 × 3") != std::string::npos,
-            "floating text must use simple purchase and sale wording");
+    require(text.find("收购 10u x 5") != std::string::npos &&
+                text.find("出售 12u x 3") != std::string::npos,
+            "floating text must use whole-u prices and quantities");
+    require(text.find("右击") == std::string::npos && std::count(text.begin(), text.end(), '\n') == 2,
+            "floating text must contain only the item and two price lines");
     for (const auto banned : {"\u76d8\u53e3", "\u4e70\u4e00", "\u5356\u4e00", "\u4e70\u76d8", "\u5356\u76d8"}) {
         require(text.find(banned) == std::string::npos, "floating text must not use stock-market wording");
     }
@@ -185,12 +209,22 @@ void testMarketDisplay() {
     auto moved = anchor;
     moved.y += 1.0F;
     require(!exchange::shouldRepositionHologram(exchange::TargetKind::Block, std::nullopt, anchor) &&
-                !exchange::shouldRepositionHologram(exchange::TargetKind::Block, anchor, moved),
-            "a block label must never be periodically teleported");
+                !exchange::shouldRepositionHologram(exchange::TargetKind::Block, anchor, anchor) &&
+                exchange::shouldRepositionHologram(exchange::TargetKind::Block, anchor, moved),
+            "a block label may be corrected once but must stay still at its remembered anchor");
     require(exchange::shouldRepositionHologram(exchange::TargetKind::Actor, std::nullopt, anchor) &&
                 !exchange::shouldRepositionHologram(exchange::TargetKind::Actor, anchor, anchor) &&
                 exchange::shouldRepositionHologram(exchange::TargetKind::Actor, anchor, moved),
             "an actor label must move only when its target anchor changes");
+
+    require(exchange::itemFrameSupportOffset(0) == exchange::BlockOffset{0, 1, 0} &&
+                exchange::itemFrameSupportOffset(1) == exchange::BlockOffset{0, -1, 0} &&
+                exchange::itemFrameSupportOffset(2) == exchange::BlockOffset{0, 0, 1} &&
+                exchange::itemFrameSupportOffset(3) == exchange::BlockOffset{0, 0, -1} &&
+                exchange::itemFrameSupportOffset(4) == exchange::BlockOffset{1, 0, 0} &&
+                exchange::itemFrameSupportOffset(5) == exchange::BlockOffset{-1, 0, 0} &&
+                !exchange::itemFrameSupportOffset(6),
+            "item-frame facing must resolve to the block behind the frame");
 }
 
 void testCanonicalItemIdentity() {
@@ -417,7 +451,7 @@ void testDatabaseIntegration() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     require(!database.query("SELECT 1").empty(), "first query after idle timeout must reconnect and retry once");
     truncateExchangeTables(database);
-    exchange::ExchangeService service(database, 100'000, 2304);
+    exchange::ExchangeService service(database, 100'000, 640);
 
     constexpr std::string_view Alice = "00000000-0000-0000-0000-000000000001";
     constexpr std::string_view Bob = "00000000-0000-0000-0000-000000000002";
@@ -452,9 +486,15 @@ void testDatabaseIntegration() {
             "ordered sell escrow waits for receipt cleanup");
     service.markSellEscrowCleaned(initial_escrow.id);
     require(service.unfinishedSellEscrows(Bob).empty(), "cleaned sell escrow must be final");
+    const auto historical_escrow = service.findSellEscrow(initial_escrow.id, Bob);
+    require(historical_escrow && historical_escrow->status == exchange::SellEscrowStatus::Ordered &&
+                historical_escrow->cleaned,
+            "inventory recovery must still find a cleaned sell escrow by its marker id");
     const auto canceled_escrow = service.prepareSellEscrow(
         {market.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 150, 1});
     service.cancelSellEscrow(canceled_escrow.id);
+    require(service.findSellEscrow(canceled_escrow.id, Bob)->status == exchange::SellEscrowStatus::Canceled,
+            "inventory recovery must identify a canceled sell escrow");
     require(sell.open_quantity == 5 && sell.filled_quantity == 0, "resting sell order");
     auto book = service.orderBook(market.id, 5);
     require(book.asks.size() == 1 && book.asks.front().price_cents == 100 && book.asks.front().quantity == 5,
@@ -486,8 +526,14 @@ void testDatabaseIntegration() {
             "applied delivery claim waits for marker cleanup");
     service.markDeliveryClaimCleaned(prepared_claim.id);
     require(service.unfinishedDeliveryClaims(Alice).empty(), "cleaned delivery claim must be final");
+    const auto historical_claim = service.findDeliveryClaim(prepared_claim.id, Alice);
+    require(historical_claim && historical_claim->status == exchange::DeliveryClaimStatus::Applied &&
+                historical_claim->cleaned,
+            "inventory recovery must still find a cleaned delivery claim by its marker id");
     const auto abandoned_claim = service.prepareDeliveryClaim(alice_deliveries.front().id, Alice, 1);
     service.completeDeliveryClaim(abandoned_claim.id, 0);
+    require(service.findDeliveryClaim(abandoned_claim.id, Alice)->status == exchange::DeliveryClaimStatus::Canceled,
+            "inventory recovery must identify a canceled delivery claim");
     require(service.pendingDeliveries(Alice).front().claimed_quantity == 2,
             "claim prepared before a crash can be safely released when no tagged item exists");
 

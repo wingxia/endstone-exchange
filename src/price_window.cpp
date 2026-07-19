@@ -1,6 +1,8 @@
 #include "endstone_exchange/price_window.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace exchange {
@@ -10,6 +12,24 @@ Cents PriceSliderWindow::priceAt(const int index) const {
         throw std::runtime_error("price slider index is outside its window");
     }
     return base_cents + step_cents * index;
+}
+
+Cents PriceSliderWindow::priceFromDisplayedUnits(const double units) const {
+    if (!std::isfinite(units)) {
+        throw std::runtime_error("价格必须是有效整数");
+    }
+    const auto raw_cents = static_cast<long double>(units) * 100.0L;
+    if (raw_cents < static_cast<long double>(std::numeric_limits<Cents>::min()) ||
+        raw_cents > static_cast<long double>(std::numeric_limits<Cents>::max())) {
+        throw std::runtime_error("价格超出允许范围");
+    }
+    const auto cents = static_cast<Cents>(std::llround(raw_cents));
+    const auto maximum = priceAt(max_index);
+    if (raw_cents != static_cast<long double>(cents) || cents < base_cents || cents > maximum ||
+        (cents - base_cents) % step_cents != 0) {
+        throw std::runtime_error("价格超出允许范围，或不是整数");
+    }
+    return cents;
 }
 
 PriceSliderWindow makePriceSliderWindow(const Cents minimum, const Cents maximum, const Cents step,

@@ -19,8 +19,10 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <set>
 #include <string_view>
 #include <thread>
+#include <variant>
 
 namespace exchange {
 
@@ -871,19 +873,19 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto account_balance = service_->balance(player.getUniqueId().str());
         const auto sellable_quantity = sellableItemCount(player.getInventory(), market_it->second.item);
 
-        std::string book_text = "§a有人要买（单价 × 数量）§r\n";
+        std::string book_text = "§a有人要买（单价 x 数量）§r\n";
         if (book.bids.empty()) {
             book_text += "  --\n";
         }
         for (const auto &level : book.bids) {
-            book_text += std::format("  §a{} × {}§r\n", formatMoney(level.price_cents), level.quantity);
+            book_text += std::format("  §a{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
         }
-        book_text += "§c有人在卖（单价 × 数量）§r\n";
+        book_text += "§c有人在卖（单价 x 数量）§r\n";
         if (book.asks.empty()) {
             book_text += "  --\n";
         }
         for (const auto &level : book.asks) {
-            book_text += std::format("  §c{} × {}§r\n", formatMoney(level.price_cents), level.quantity);
+            book_text += std::format("  §c{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
         }
 
         Cents reference = book.last_price_cents.value_or(1000);
@@ -897,8 +899,8 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto price_window = makePriceSliderWindow(config_.market.price_min_cents, config_.market.price_max_cents,
                                                         config_.market.price_step_cents, reference);
         const auto price_label = std::format(
-            "我的单价（{} 至 {}，每格 {}；立即交易时忽略）", formatMoney(price_window.base_cents),
-            formatMoney(price_window.priceAt(price_window.max_index)), formatMoney(price_window.step_cents));
+            "我的单价（{} 至 {}，每格 {}；立即交易时忽略）", formatUnitPrice(price_window.base_cents),
+            formatUnitPrice(price_window.priceAt(price_window.max_index)), formatUnitPrice(price_window.step_cents));
 
         endstone::ModalForm form;
         form.setTitle("交易 · " + market_it->second.item.name)
@@ -913,8 +915,11 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
                 "交易方式", {"按我的价格购买", "按我的价格出售", "立即购买", "立即出售"}, 0))
             .addControl(
                 endstone::Slider("数量", 1.0F, static_cast<float>(config_.market.max_order_quantity), 1.0F, 1.0F))
-            .addControl(endstone::Slider(price_label, 0.0F, static_cast<float>(price_window.max_index), 1.0F,
-                                         static_cast<float>(price_window.default_index)))
+            .addControl(endstone::Slider(
+                price_label, static_cast<float>(price_window.base_cents) / 100.0F,
+                static_cast<float>(price_window.priceAt(price_window.max_index)) / 100.0F,
+                static_cast<float>(price_window.step_cents) / 100.0F,
+                static_cast<float>(price_window.priceAt(price_window.default_index)) / 100.0F))
             .setSubmitButton("确认")
             .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); })
             .setOnSubmit([this, market_id, price_window, player_uuid](endstone::Player *form_player,
@@ -965,12 +970,7 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
         const auto quantity = static_cast<int>(rounded_quantity);
         Cents price_cents = 0;
         if (action < 2) {
-            const auto rounded_price_index = std::round(values[2]);
-            if (values[2] != rounded_price_index || rounded_price_index < 0.0 ||
-                rounded_price_index > static_cast<double>(price_window.max_index)) {
-                throw std::runtime_error("所选价格无效");
-            }
-            price_cents = price_window.priceAt(static_cast<int>(rounded_price_index));
+            price_cents = price_window.priceFromDisplayedUnits(values[2]);
         }
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
@@ -1011,7 +1011,7 @@ void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_i
                                result.order_id, unavailable, delivery_note, formatMoney(result.balance_cents));
         } else if (result.filled_quantity == 0) {
             player.sendMessage("§a订单 #{} 已保存：等待按每件 {} {} {} 件{}。余额 {}。§r", result.order_id,
-                               formatMoney(request.price_cents), request.side == Side::Buy ? "购买" : "出售",
+                               formatUnitPrice(request.price_cents), request.side == Side::Buy ? "购买" : "出售",
                                result.open_quantity, delivery_note, formatMoney(result.balance_cents));
         } else if (result.open_quantity > 0) {
             player.sendMessage("§a订单 #{} 已完成 {} 件，剩余 {} 件继续等待，总金额 {}{}。余额 {}。§r",
@@ -1039,13 +1039,21 @@ ExecutionResult ExchangePlugin::submitSellEscrow(endstone::Player &player, const
     const auto escrow = service_->prepareSellEscrow(request);
     try {
         const auto tagged = tagSellItems(inventory, escrow.item, escrow.requested_quantity, escrow.id);
+        const auto persisted_tagged = taggedSellItems(inventory, escrow.id);
+        if (persisted_tagged.quantity != tagged.quantity || persisted_tagged.stacks != tagged.stacks) {
+            throw std::runtime_error("出售物品没有完整进入暂存状态");
+        }
         service_->markSellEscrowTagged(escrow.id, tagged.quantity, tagged.stacks);
         replaceTaggedSellItemsWithReceipts(inventory, escrow.id);
         if (sellReceiptCount(inventory, escrow.id) != tagged.stacks) {
             throw std::runtime_error("出售物品的暂存记录不一致，已保留恢复状态");
         }
         auto result = service_->executeSellEscrow(escrow.id);
+        removeTaggedSellItems(inventory, escrow.id);
         removeSellReceipts(inventory, escrow.id);
+        if (taggedSellItems(inventory, escrow.id).quantity != 0 || sellReceiptCount(inventory, escrow.id) != 0) {
+            throw std::runtime_error("出售物品的暂存标记尚未清除");
+        }
         service_->markSellEscrowCleaned(escrow.id);
         return result;
     } catch (const std::exception &error) {
@@ -1058,6 +1066,60 @@ ExecutionResult ExchangePlugin::submitSellEscrow(endstone::Player &player, const
                                 recovery_error.what());
         }
         throw std::runtime_error(original_error);
+    }
+}
+
+void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
+    auto &inventory = player.getInventory();
+    const auto player_uuid = player.getUniqueId().str();
+    const auto markers = internalEscrowMarkers(inventory);
+
+    for (const auto claim_id : markers.delivery_claim_ids) {
+        const auto claim = service_->findDeliveryClaim(claim_id, player_uuid);
+        if (!claim) {
+            getLogger().warning("Player {} has an unknown delivery marker {}.", player.getName(), claim_id);
+            continue;
+        }
+        if (claim->status == DeliveryClaimStatus::Applied) {
+            clearDeliveryClaimTag(inventory, claim_id, claim->item);
+            if (taggedItemCount(inventory, claim_id) != 0) {
+                throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim_id));
+            }
+            if (!claim->cleaned) {
+                service_->markDeliveryClaimCleaned(claim_id);
+            }
+        } else if (claim->status == DeliveryClaimStatus::Canceled) {
+            removeDeliveryClaimItems(inventory, claim_id);
+            if (taggedItemCount(inventory, claim_id) != 0) {
+                throw std::runtime_error(std::format("已取消的交付标记 {} 尚未清除", claim_id));
+            }
+        }
+    }
+
+    std::set<Id> sell_escrow_ids(markers.sell_item_escrow_ids.begin(), markers.sell_item_escrow_ids.end());
+    sell_escrow_ids.insert(markers.sell_receipt_escrow_ids.begin(), markers.sell_receipt_escrow_ids.end());
+    for (const auto escrow_id : sell_escrow_ids) {
+        const auto escrow = service_->findSellEscrow(escrow_id, player_uuid);
+        if (!escrow) {
+            getLogger().warning("Player {} has an unknown sell marker {}.", player.getName(), escrow_id);
+            continue;
+        }
+        if (escrow->status == SellEscrowStatus::Ordered) {
+            removeTaggedSellItems(inventory, escrow_id);
+            removeSellReceipts(inventory, escrow_id);
+            if (taggedSellItems(inventory, escrow_id).quantity != 0 || sellReceiptCount(inventory, escrow_id) != 0) {
+                throw std::runtime_error(std::format("出售暂存标记 {} 尚未从物品栏清除", escrow_id));
+            }
+            if (!escrow->cleaned) {
+                service_->markSellEscrowCleaned(escrow_id);
+            }
+        } else if (escrow->status == SellEscrowStatus::Canceled) {
+            restoreTaggedSellItems(inventory, escrow_id, escrow->item);
+            removeSellReceipts(inventory, escrow_id);
+            if (taggedSellItems(inventory, escrow_id).quantity != 0 || sellReceiptCount(inventory, escrow_id) != 0) {
+                throw std::runtime_error(std::format("已取消的出售暂存标记 {} 尚未清除", escrow_id));
+            }
+        }
     }
 }
 
@@ -1087,7 +1149,11 @@ void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
             escrow.status = SellEscrowStatus::Ordered;
         }
         if (escrow.status == SellEscrowStatus::Ordered) {
+            removeTaggedSellItems(inventory, escrow.id);
             removeSellReceipts(inventory, escrow.id);
+            if (taggedSellItems(inventory, escrow.id).quantity != 0 || sellReceiptCount(inventory, escrow.id) != 0) {
+                throw std::runtime_error("出售物品的暂存标记尚未完整清除");
+            }
             service_->markSellEscrowCleaned(escrow.id);
         }
     }
@@ -1128,6 +1194,7 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player) {
 }
 
 int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announce) {
+    reconcileInternalEscrowMarkers(player);
     reconcileSellEscrows(player);
     const auto player_uuid = player.getUniqueId().str();
     auto &inventory = player.getInventory();
@@ -1144,6 +1211,9 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
         }
         if (tagged > 0) {
             clearDeliveryClaimTag(inventory, claim.id, claim.item);
+        }
+        if (taggedItemCount(inventory, claim.id) != 0) {
+            throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim.id));
         }
         service_->markDeliveryClaimCleaned(claim.id);
     }
@@ -1164,6 +1234,9 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
         service_->completeDeliveryClaim(claim.id, delivered);
         if (delivered > 0) {
             clearDeliveryClaimTag(inventory, claim.id, delivery.item);
+            if (taggedItemCount(inventory, claim.id) != 0) {
+                throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim.id));
+            }
             service_->markDeliveryClaimCleaned(claim.id);
             delivered_total += delivered;
         }
@@ -1353,6 +1426,10 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
         std::optional<HologramAnchor> previous_anchor;
         if (const auto anchor = hologram_anchors_.find(market.id); anchor != hologram_anchors_.end()) {
             previous_anchor = anchor->second;
+        } else {
+            const auto existing_location = hologram->getLocation();
+            previous_anchor = HologramAnchor{existing_location.getDimension().getName(), existing_location.getX(),
+                                             existing_location.getY(), existing_location.getZ()};
         }
         if (shouldRepositionHologram(market.target_kind, previous_anchor, current_anchor)) {
             static_cast<void>(hologram->teleport(hologram_location));
@@ -1615,9 +1692,30 @@ std::optional<endstone::Location> ExchangePlugin::targetLocation(const Market &m
         if (dimension == nullptr || !market.block_x || !market.block_y || !market.block_z) {
             return std::nullopt;
         }
-        return endstone::Location(*dimension, static_cast<float>(*market.block_x) + 0.5F,
-                                  static_cast<float>(*market.block_y) + 1.0F,
-                                  static_cast<float>(*market.block_z) + 0.5F);
+        int anchor_x = *market.block_x;
+        int anchor_y = *market.block_y;
+        int anchor_z = *market.block_z;
+        bool unresolved_frame = false;
+        const auto block = dimension->getBlockAt(*market.block_x, *market.block_y, *market.block_z);
+        if (block && isItemFrameBlock(block->getType())) {
+            unresolved_frame = true;
+            if (const auto data = block->getData()) {
+                const auto states = data->getBlockStates();
+                if (const auto facing = states.find("facing_direction"); facing != states.end()) {
+                    if (const auto value = std::get_if<int>(&facing->second)) {
+                        if (const auto support = itemFrameSupportOffset(*value)) {
+                            anchor_x += support->x;
+                            anchor_y += support->y;
+                            anchor_z += support->z;
+                            unresolved_frame = false;
+                        }
+                    }
+                }
+            }
+        }
+        const float label_y = static_cast<float>(anchor_y) + (unresolved_frame ? 2.0F : 1.0F);
+        return endstone::Location(*dimension, static_cast<float>(anchor_x) + 0.5F, label_y,
+                                  static_cast<float>(anchor_z) + 0.5F);
     }
     if (auto *actor = findActorByTag(targetTag(market.id)); actor != nullptr) {
         return actor->getLocation();

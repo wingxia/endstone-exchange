@@ -11,6 +11,7 @@ struct PriceSliderWindow {
     int default_index{0};
 
     [[nodiscard]] Cents priceAt(int index) const;
+    [[nodiscard]] Cents priceFromDisplayedUnits(double units) const;
 };
 
 [[nodiscard]] PriceSliderWindow makePriceSliderWindow(Cents minimum, Cents maximum, Cents step, Cents reference,

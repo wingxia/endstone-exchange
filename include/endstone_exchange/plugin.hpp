@@ -83,6 +83,7 @@ class ExchangePlugin : public endstone::Plugin {
                          std::string_view response);
     void openOrdersForm(endstone::Player &player);
     [[nodiscard]] ExecutionResult submitSellEscrow(endstone::Player &player, const OrderRequest &request);
+    void reconcileInternalEscrowMarkers(endstone::Player &player);
     void reconcileSellEscrows(endstone::Player &player);
     [[nodiscard]] int claimDeliveries(endstone::Player &player, bool announce = true);
     void queueInventoryResync(endstone::Player &player);

@@ -13,8 +13,8 @@ using Id = std::uint64_t;
 enum class TargetKind { Block, Actor };
 enum class Side { Buy, Sell };
 enum class OrderType { Limit, Market };
-enum class DeliveryClaimStatus { Prepared, Applied };
-enum class SellEscrowStatus { Prepared, Tagged, Ordered };
+enum class DeliveryClaimStatus { Prepared, Applied, Canceled };
+enum class SellEscrowStatus { Prepared, Tagged, Ordered, Canceled };
 
 struct ItemPrototype {
     std::string type;

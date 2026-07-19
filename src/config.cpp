@@ -235,10 +235,10 @@ connect_timeout_seconds = 5
 [market]
 admin_only = true
 initial_balance = 10000.00
-max_order_quantity = 2304
-price_min = 0.01
-price_max = 1000000.00
-price_step = 0.01
+max_order_quantity = 640
+price_min = 1
+price_max = 5000
+price_step = 1
 order_book_depth = 5
 hologram_refresh_ticks = 20
 frame_capture_delay_ticks = 80
@@ -266,6 +266,10 @@ void Config::validate() const
     }
     if (market.price_max_cents > std::numeric_limits<std::int64_t>::max() / market.max_order_quantity) {
         throw std::runtime_error("maximum order value is too large");
+    }
+    if (market.price_min_cents % 100 != 0 || market.price_max_cents % 100 != 0 ||
+        market.price_step_cents % 100 != 0) {
+        throw std::runtime_error("prices must use whole u units");
     }
 }
 

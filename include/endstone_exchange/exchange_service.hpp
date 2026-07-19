@@ -33,6 +33,7 @@ class ExchangeService {
 
     [[nodiscard]] std::vector<Delivery> pendingDeliveries(std::string_view player_uuid);
     [[nodiscard]] std::vector<DeliveryClaim> unfinishedDeliveryClaims(std::string_view player_uuid);
+    [[nodiscard]] std::optional<DeliveryClaim> findDeliveryClaim(Id claim_id, std::string_view player_uuid);
     [[nodiscard]] DeliveryClaim prepareDeliveryClaim(Id delivery_id, std::string_view player_uuid, int quantity);
     void completeDeliveryClaim(Id claim_id, int delivered_quantity);
     void markDeliveryClaimCleaned(Id claim_id);
@@ -43,6 +44,7 @@ class ExchangeService {
     void cancelSellEscrow(Id escrow_id);
     void markSellEscrowCleaned(Id escrow_id);
     [[nodiscard]] std::vector<SellEscrow> unfinishedSellEscrows(std::string_view player_uuid);
+    [[nodiscard]] std::optional<SellEscrow> findSellEscrow(Id escrow_id, std::string_view player_uuid);
 
   private:
     Database &database_;

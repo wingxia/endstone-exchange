@@ -51,6 +51,65 @@ std::string idList(const std::vector<Id> &ids) {
     return result;
 }
 
+DeliveryClaimStatus deliveryClaimStatus(const std::string_view status) {
+    if (status == "PREPARED") {
+        return DeliveryClaimStatus::Prepared;
+    }
+    if (status == "APPLIED") {
+        return DeliveryClaimStatus::Applied;
+    }
+    if (status == "CANCELED") {
+        return DeliveryClaimStatus::Canceled;
+    }
+    throw std::runtime_error("delivery claim has an unknown status");
+}
+
+DeliveryClaim deliveryClaimFromRow(const QueryRow &row) {
+    return {static_cast<Id>(cellInt64(row, 0)),
+            static_cast<Id>(cellInt64(row, 1)),
+            {cellString(row, 2), cellInt(row, 3), bytesFromCell(row, 4), cellString(row, 5)},
+            cellInt(row, 6),
+            cellInt(row, 7),
+            deliveryClaimStatus(cellString(row, 8)),
+            cellInt(row, 9) != 0};
+}
+
+SellEscrowStatus sellEscrowStatus(const std::string_view status) {
+    if (status == "PREPARED") {
+        return SellEscrowStatus::Prepared;
+    }
+    if (status == "TAGGED") {
+        return SellEscrowStatus::Tagged;
+    }
+    if (status == "ORDERED") {
+        return SellEscrowStatus::Ordered;
+    }
+    if (status == "CANCELED") {
+        return SellEscrowStatus::Canceled;
+    }
+    throw std::runtime_error("sell escrow has an unknown status");
+}
+
+SellEscrow sellEscrowFromRow(const QueryRow &row) {
+    std::optional<Id> order_id;
+    if (const auto value = optionalInt64(row, 14)) {
+        order_id = static_cast<Id>(*value);
+    }
+    return {static_cast<Id>(cellInt64(row, 0)),
+            static_cast<Id>(cellInt64(row, 1)),
+            {cellString(row, 2), cellInt(row, 3), bytesFromCell(row, 4), cellString(row, 5)},
+            cellString(row, 6),
+            cellString(row, 7),
+            cellString(row, 8) == "LIMIT" ? OrderType::Limit : OrderType::Market,
+            cellInt64(row, 9),
+            cellInt(row, 10),
+            cellInt(row, 11),
+            cellInt(row, 12),
+            sellEscrowStatus(cellString(row, 13)),
+            order_id,
+            cellInt(row, 15) != 0};
+}
+
 } // namespace
 
 ExchangeService::ExchangeService(Database &database, const Cents initial_balance_cents, const int max_order_quantity)
@@ -633,16 +692,20 @@ std::vector<DeliveryClaim> ExchangeService::unfinishedDeliveryClaims(const std::
     std::vector<DeliveryClaim> result;
     result.reserve(rows.size());
     for (const auto &row : rows) {
-        result.push_back(
-            {static_cast<Id>(cellInt64(row, 0)),
-             static_cast<Id>(cellInt64(row, 1)),
-             {cellString(row, 2), cellInt(row, 3), bytesFromCell(row, 4), cellString(row, 5)},
-             cellInt(row, 6),
-             cellInt(row, 7),
-             cellString(row, 8) == "PREPARED" ? DeliveryClaimStatus::Prepared : DeliveryClaimStatus::Applied,
-             cellInt(row, 9) != 0});
+        result.push_back(deliveryClaimFromRow(row));
     }
     return result;
+}
+
+std::optional<DeliveryClaim> ExchangeService::findDeliveryClaim(const Id claim_id,
+                                                                const std::string_view player_uuid) {
+    const auto rows = database_.query(std::format(
+        "SELECT c.id,c.delivery_id,m.item_type,m.item_data,m.item_nbt,m.item_name,c.quantity,c.applied_qty,c.status,"
+        "c.cleaned_at IS NOT NULL FROM exchange_delivery_claims c "
+        "JOIN exchange_deliveries d ON d.id=c.delivery_id JOIN exchange_markets m ON m.id=d.market_id "
+        "WHERE c.id={} AND c.player_uuid={}",
+        claim_id, database_.quote(player_uuid)));
+    return rows.empty() ? std::nullopt : std::optional<DeliveryClaim>(deliveryClaimFromRow(rows.front()));
 }
 
 DeliveryClaim ExchangeService::prepareDeliveryClaim(const Id delivery_id, const std::string_view player_uuid,
@@ -909,28 +972,20 @@ std::vector<SellEscrow> ExchangeService::unfinishedSellEscrows(const std::string
     std::vector<SellEscrow> result;
     result.reserve(rows.size());
     for (const auto &row : rows) {
-        const auto status = cellString(row, 13);
-        std::optional<Id> order_id;
-        if (const auto value = optionalInt64(row, 14)) {
-            order_id = static_cast<Id>(*value);
-        }
-        result.push_back({static_cast<Id>(cellInt64(row, 0)),
-                          static_cast<Id>(cellInt64(row, 1)),
-                          {cellString(row, 2), cellInt(row, 3), bytesFromCell(row, 4), cellString(row, 5)},
-                          cellString(row, 6),
-                          cellString(row, 7),
-                          cellString(row, 8) == "LIMIT" ? OrderType::Limit : OrderType::Market,
-                          cellInt64(row, 9),
-                          cellInt(row, 10),
-                          cellInt(row, 11),
-                          cellInt(row, 12),
-                          status == "PREPARED"
-                              ? SellEscrowStatus::Prepared
-                              : (status == "TAGGED" ? SellEscrowStatus::Tagged : SellEscrowStatus::Ordered),
-                          order_id,
-                          cellInt(row, 15) != 0});
+        result.push_back(sellEscrowFromRow(row));
     }
     return result;
+}
+
+std::optional<SellEscrow> ExchangeService::findSellEscrow(const Id escrow_id,
+                                                          const std::string_view player_uuid) {
+    const auto rows = database_.query(std::format(
+        "SELECT e.id,e.market_id,m.item_type,m.item_data,m.item_nbt,m.item_name,e.player_uuid,e.player_name,"
+        "e.order_type,e.price_cents,e.requested_qty,e.tagged_qty,e.receipt_count,e.status,e.order_id,"
+        "e.cleaned_at IS NOT NULL FROM exchange_sell_escrows e JOIN exchange_markets m ON m.id=e.market_id "
+        "WHERE e.id={} AND e.player_uuid={}",
+        escrow_id, database_.quote(player_uuid)));
+    return rows.empty() ? std::nullopt : std::optional<SellEscrow>(sellEscrowFromRow(rows.front()));
 }
 
 Market ExchangeService::marketFromRow(const QueryRow &row) {
