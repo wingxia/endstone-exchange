@@ -2,6 +2,7 @@
 #include "endstone_exchange/database.hpp"
 #include "endstone_exchange/exchange_service.hpp"
 #include "endstone_exchange/hologram_packet.hpp"
+#include "endstone_exchange/inventory_escrow.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/localization.hpp"
@@ -71,6 +72,26 @@ void testNbtCodec() {
         rejected = true;
     }
     require(rejected, "truncated NBT must be rejected");
+}
+
+void testDeliveryMarkerCleanup() {
+    endstone::CompoundTag enchantment;
+    enchantment.insert_or_assign("id", endstone::ShortTag(3));
+    enchantment.insert_or_assign("lvl", endstone::ShortTag(4));
+    endstone::ListTag enchantments;
+    enchantments.emplace_back(std::move(enchantment));
+
+    endstone::CompoundTag tagged;
+    tagged.insert_or_assign("ench", std::move(enchantments));
+    tagged.insert_or_assign("__endstone_exchange_claim", endstone::StringTag("57"));
+
+    require(exchange::clearDeliveryClaimTag(tagged, 57), "matching delivery marker must be removed");
+    require(!tagged.contains("__endstone_exchange_claim") && tagged.contains("ench"),
+            "delivery cleanup must preserve the live enchanted-item NBT");
+
+    tagged.insert_or_assign("__endstone_exchange_claim", endstone::StringTag("58"));
+    require(!exchange::clearDeliveryClaimTag(tagged, 57) && tagged.contains("__endstone_exchange_claim"),
+            "delivery cleanup must not remove a different claim marker");
 }
 
 void testConfig() {
@@ -180,8 +201,8 @@ void testTradeFormFlow() {
     compact_book.asks = {{1'100, 4}};
     const auto overview = exchange::tradeOverviewText(compact_book, "9900u", 64, {});
     require(overview ==
-                "§a收购§r  10u x 90  ·  9u x 20  ·  …\n"
-                "§c出售§r  11u x 4\n"
+                "§a有人收购§r  10u x 90  ·  9u x 20  ·  …\n"
+                "§c有人出售§r  11u x 4\n"
                 "§6余额§r §e9900u§r  ·  §6可卖§r §e64 件§r",
             "trade overview must fit the book and account state into three compact lines");
     require(overview.find("\n\n") == std::string::npos, "compact trade overview must not contain blank lines");
@@ -375,8 +396,8 @@ void testMarketDisplay() {
     book.bids.push_back({1000, 5});
     book.asks.push_back({1200, 3});
     const auto text = exchange::marketHologramText(market, book);
-    require(text.find("收购 10u x 5") != std::string::npos &&
-                text.find("出售 12u x 3") != std::string::npos,
+    require(text.find("有人收购 10u x 5") != std::string::npos &&
+                text.find("有人出售 12u x 3") != std::string::npos,
             "floating text must use whole-u prices and quantities");
     require(text.find("右击") == std::string::npos && std::count(text.begin(), text.end(), '\n') == 2,
             "floating text must contain only the item and two price lines");
@@ -384,11 +405,11 @@ void testMarketDisplay() {
         require(text.find(banned) == std::string::npos, "floating text must not use stock-market wording");
     }
     require(exchange::marketHologramText(market, book, exchange::Language::English)
-                    .find("Buying 10u x 5") != std::string::npos &&
+                    .find("Someone wants to buy 10u x 5") != std::string::npos &&
                 exchange::marketHologramText(market, book, exchange::Language::TraditionalChinese)
-                        .find("收購 10u x 5") != std::string::npos &&
+                        .find("有人收購 10u x 5") != std::string::npos &&
                 exchange::marketHologramText(market, book, exchange::Language::Japanese)
-                        .find("購入希望 10u x 5") != std::string::npos,
+                        .find("購入希望者 10u x 5") != std::string::npos,
             "floating text follows each recipient's language");
 
     const exchange::HologramAnchor anchor{"Overworld", 10.5F, 65.0F, 20.5F};
@@ -1168,6 +1189,7 @@ void testDatabaseIntegration() {
 int main() {
     try {
         testNbtCodec();
+        testDeliveryMarkerCleanup();
         testConfig();
         testTradeFormFlow();
         testLocalization();

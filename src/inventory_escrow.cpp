@@ -18,8 +18,7 @@ constexpr std::string_view SellItemTag = "__endstone_exchange_sell_item";
 constexpr std::string_view SellReceiptTag = "__endstone_exchange_sell_receipt";
 constexpr int OffHandSlot = -1;
 
-std::optional<Id> markerId(const endstone::ItemStack &item, const std::string_view marker) {
-    const auto nbt = item.getNbt();
+std::optional<Id> markerId(const endstone::CompoundTag &nbt, const std::string_view marker) {
     const auto key = std::string(marker);
     if (!nbt.contains(key) || nbt.at(key).type() != endstone::nbt::Type::String) {
         return std::nullopt;
@@ -32,6 +31,10 @@ std::optional<Id> markerId(const endstone::ItemStack &item, const std::string_vi
     } catch (const std::exception &) {
         return std::nullopt;
     }
+}
+
+std::optional<Id> markerId(const endstone::ItemStack &item, const std::string_view marker) {
+    return markerId(item.getNbt(), marker);
 }
 
 void setMarker(endstone::ItemStack &item, const std::string_view marker, const Id id) {
@@ -96,11 +99,20 @@ std::optional<Id> deliveryClaimId(const endstone::ItemStack &item) {
     return markerId(item, DeliveryClaimTag);
 }
 
-bool clearDeliveryClaimTag(endstone::ItemStack &item, const Id claim_id, const ItemPrototype &prototype) {
-    if (deliveryClaimId(item) != claim_id) {
+bool clearDeliveryClaimTag(endstone::CompoundTag &nbt, const Id claim_id) {
+    if (markerId(nbt, DeliveryClaimTag) != claim_id) {
         return false;
     }
-    item.setNbt(originalNbt(prototype));
+    nbt.erase(std::string(DeliveryClaimTag));
+    return !markerId(nbt, DeliveryClaimTag).has_value();
+}
+
+bool clearDeliveryClaimTag(endstone::ItemStack &item, const Id claim_id) {
+    auto nbt = item.getNbt();
+    if (!clearDeliveryClaimTag(nbt, claim_id)) {
+        return false;
+    }
+    item.setNbt(nbt);
     return !deliveryClaimId(item).has_value();
 }
 
@@ -117,16 +129,21 @@ int taggedItemCount(const endstone::PlayerInventory &inventory, const Id claim_i
     return result;
 }
 
-void clearDeliveryClaimTag(endstone::PlayerInventory &inventory, const Id claim_id,
-                           const ItemPrototype &prototype) {
+void clearDeliveryClaimTag(endstone::PlayerInventory &inventory, const Id claim_id) {
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         auto item = inventory.getItem(slot);
-        if (item && clearDeliveryClaimTag(*item, claim_id, prototype)) {
+        if (item && clearDeliveryClaimTag(*item, claim_id)) {
+            // A direct NBT-only replacement can be ignored for items whose live Bedrock
+            // components differ from their persisted market snapshot (notably enchanted
+            // books). Clearing the slot first forces the clean stack to receive a new
+            // inventory network identity and makes the update durable on the client.
+            inventory.clear(slot);
             inventory.setItem(slot, std::move(item));
         }
     }
     auto offhand = inventory.getItemInOffHand();
-    if (offhand && clearDeliveryClaimTag(*offhand, claim_id, prototype)) {
+    if (offhand && clearDeliveryClaimTag(*offhand, claim_id)) {
+        inventory.setItemInOffHand(std::nullopt);
         inventory.setItemInOffHand(std::move(*offhand));
     }
 }

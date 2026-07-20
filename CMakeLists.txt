@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.6.0 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.6.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -64,6 +64,7 @@ if(EXCHANGE_BUILD_TESTS)
     enable_testing()
     add_executable(exchange_tests
         tests/test_main.cpp
+        src/inventory_escrow.cpp
         src/nbt_codec.cpp
         src/structure_reader.cpp
         ${EXCHANGE_CORE_SOURCES}

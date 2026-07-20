@@ -30,10 +30,10 @@ struct InternalEscrowMarkers {
 [[nodiscard]] int itemCount(const std::unordered_map<int, endstone::ItemStack> &items);
 
 [[nodiscard]] std::optional<Id> deliveryClaimId(const endstone::ItemStack &item);
-[[nodiscard]] bool clearDeliveryClaimTag(endstone::ItemStack &item, Id claim_id,
-                                         const ItemPrototype &prototype);
+[[nodiscard]] bool clearDeliveryClaimTag(endstone::CompoundTag &nbt, Id claim_id);
+[[nodiscard]] bool clearDeliveryClaimTag(endstone::ItemStack &item, Id claim_id);
 [[nodiscard]] int taggedItemCount(const endstone::PlayerInventory &inventory, Id claim_id);
-void clearDeliveryClaimTag(endstone::PlayerInventory &inventory, Id claim_id, const ItemPrototype &prototype);
+void clearDeliveryClaimTag(endstone::PlayerInventory &inventory, Id claim_id);
 void removeDeliveryClaimItems(endstone::PlayerInventory &inventory, Id claim_id);
 
 [[nodiscard]] std::optional<Id> sellItemEscrowId(const endstone::ItemStack &item);

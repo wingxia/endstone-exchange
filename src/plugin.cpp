@@ -1246,21 +1246,31 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
     for (const auto claim_id : markers.delivery_claim_ids) {
         const auto claim = service_->findDeliveryClaim(claim_id, player_uuid);
         if (!claim) {
-            getLogger().warning("Player {} has an unknown delivery marker {}.", player.getName(), claim_id);
+            clearDeliveryClaimTag(inventory, claim_id);
+            if (const auto remaining = taggedItemCount(inventory, claim_id); remaining != 0) {
+                getLogger().warning("Player {} has an unknown delivery marker {} on {} item(s); cleanup will retry.",
+                                    player.getName(), claim_id, remaining);
+            } else {
+                getLogger().warning("Removed unknown delivery marker {} from player {}.", claim_id,
+                                    player.getName());
+            }
             continue;
         }
         if (claim->status == DeliveryClaimStatus::Applied) {
-            clearDeliveryClaimTag(inventory, claim_id, claim->item);
-            if (taggedItemCount(inventory, claim_id) != 0) {
-                throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim_id));
+            clearDeliveryClaimTag(inventory, claim_id);
+            if (const auto remaining = taggedItemCount(inventory, claim_id); remaining != 0) {
+                getLogger().warning("Delivery marker {} remains on {} item(s) for {}; cleanup will retry.", claim_id,
+                                    remaining, player.getName());
+                continue;
             }
             if (!claim->cleaned) {
                 service_->markDeliveryClaimCleaned(claim_id);
             }
         } else if (claim->status == DeliveryClaimStatus::Canceled) {
             removeDeliveryClaimItems(inventory, claim_id);
-            if (taggedItemCount(inventory, claim_id) != 0) {
-                throw std::runtime_error(std::format("canceled delivery marker {} was not cleared", claim_id));
+            if (const auto remaining = taggedItemCount(inventory, claim_id); remaining != 0) {
+                getLogger().warning("Canceled delivery marker {} remains on {} item(s) for {}; cleanup will retry.",
+                                    claim_id, remaining, player.getName());
             }
         }
     }
@@ -1386,10 +1396,12 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
             }
         }
         if (tagged > 0) {
-            clearDeliveryClaimTag(inventory, claim.id, claim.item);
+            clearDeliveryClaimTag(inventory, claim.id);
         }
-        if (taggedItemCount(inventory, claim.id) != 0) {
-            throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim.id));
+        if (const auto remaining = taggedItemCount(inventory, claim.id); remaining != 0) {
+            getLogger().warning("Delivery marker {} remains on {} item(s) for {}; cleanup will retry.", claim.id,
+                                remaining, player.getName());
+            continue;
         }
         service_->markDeliveryClaimCleaned(claim.id);
     }
@@ -1409,11 +1421,13 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
         const int delivered = attempted - itemCount(leftovers);
         service_->completeDeliveryClaim(claim.id, delivered);
         if (delivered > 0) {
-            clearDeliveryClaimTag(inventory, claim.id, delivery.item);
-            if (taggedItemCount(inventory, claim.id) != 0) {
-                throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim.id));
+            clearDeliveryClaimTag(inventory, claim.id);
+            if (const auto remaining = taggedItemCount(inventory, claim.id); remaining == 0) {
+                service_->markDeliveryClaimCleaned(claim.id);
+            } else {
+                getLogger().warning("Delivery marker {} remains on {} item(s) for {}; cleanup will retry.", claim.id,
+                                    remaining, player.getName());
             }
-            service_->markDeliveryClaimCleaned(claim.id);
             delivered_total += delivered;
         }
         if (!leftovers.empty()) {
@@ -1438,6 +1452,11 @@ void ExchangePlugin::queueInventoryResync(endstone::Player &player) {
             auto *current = getServer().getPlayer(player_name);
             if (current == nullptr || current->getUniqueId().str() != player_uuid) {
                 return;
+            }
+            try {
+                static_cast<void>(claimDeliveries(*current, false));
+            } catch (const std::exception &error) {
+                getLogger().warning("Deferred inventory recovery failed for {}: {}", current->getName(), error.what());
             }
             auto &inventory = current->getInventory();
             auto contents = inventory.getContents();
