@@ -1,6 +1,7 @@
 #pragma once
 
 #include "endstone_exchange/domain.hpp"
+#include "endstone_exchange/localization.hpp"
 
 #include <optional>
 #include <string>
@@ -32,6 +33,8 @@ struct BlockOffset {
                                             const HologramAnchor &current_anchor) noexcept;
 [[nodiscard]] std::optional<BlockOffset> itemFrameSupportOffset(int facing_direction) noexcept;
 [[nodiscard]] std::string formatUnitPrice(Cents cents);
-[[nodiscard]] std::string marketHologramText(const Market &market, const OrderBook &book);
+[[nodiscard]] std::string marketHologramText(
+    const Market &market, const OrderBook &book, Language language = Language::SimplifiedChinese,
+    std::string_view localized_item_name = {});
 
 } // namespace exchange

@@ -71,7 +71,7 @@ struct ExecutionResult {
 struct OpenOrder {
     Id id{0};
     Id market_id{0};
-    std::string item_name;
+    ItemPrototype item;
     Side side{Side::Buy};
     Cents price_cents{0};
     int remaining_quantity{0};

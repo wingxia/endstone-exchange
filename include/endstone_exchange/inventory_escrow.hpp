@@ -8,6 +8,7 @@
 #include <endstone/inventory/player_inventory.h>
 
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -41,11 +42,14 @@ void removeDeliveryClaimItems(endstone::PlayerInventory &inventory, Id claim_id)
 [[nodiscard]] InternalEscrowMarkers internalEscrowMarkers(const endstone::PlayerInventory &inventory);
 [[nodiscard]] int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemPrototype &prototype);
 [[nodiscard]] TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,
-                                           int requested_quantity, Id escrow_id);
+                                           int requested_quantity, Id escrow_id,
+                                           Language language = Language::SimplifiedChinese,
+                                           std::string_view localized_item_name = {});
 [[nodiscard]] TaggedSellItems taggedSellItems(const endstone::PlayerInventory &inventory, Id escrow_id);
 void restoreTaggedSellItems(endstone::PlayerInventory &inventory, Id escrow_id, const ItemPrototype &prototype);
 void removeTaggedSellItems(endstone::PlayerInventory &inventory, Id escrow_id);
-void replaceTaggedSellItemsWithReceipts(endstone::PlayerInventory &inventory, Id escrow_id);
+void replaceTaggedSellItemsWithReceipts(endstone::PlayerInventory &inventory, Id escrow_id,
+                                        Language language = Language::SimplifiedChinese);
 [[nodiscard]] int sellReceiptCount(const endstone::PlayerInventory &inventory, Id escrow_id);
 void removeSellReceipts(endstone::PlayerInventory &inventory, Id escrow_id);
 

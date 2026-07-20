@@ -4,12 +4,14 @@
 #include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/item_identity.hpp"
+#include "endstone_exchange/localization.hpp"
 #include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 #include "endstone_exchange/trade_form.hpp"
 
 #include <algorithm>
+#include <array>
 #include <barrier>
 #include <bit>
 #include <chrono>
@@ -183,6 +185,80 @@ void testTradeFormFlow() {
             "price adjustment buttons must clamp to 1u through 5000u");
 }
 
+void testLocalization() {
+    using exchange::Language;
+    using exchange::Message;
+    require(exchange::translationCatalogComplete(), "every supported language must contain every message");
+    for (const auto language : {Language::SimplifiedChinese, Language::English, Language::TraditionalChinese,
+                                Language::Japanese}) {
+        for (std::size_t index = 0; index < static_cast<std::size_t>(Message::Count); ++index) {
+            const auto pattern = exchange::messageText(language, static_cast<Message>(index));
+            static_cast<void>(std::vformat(pattern, std::make_format_args("1", "2", "3", "4", "5", "6")));
+        }
+    }
+    require(exchange::languageFromLocale("zh_CN") == Language::SimplifiedChinese &&
+                exchange::languageFromLocale("zh-CN") == Language::SimplifiedChinese &&
+                exchange::languageFromLocale("en_GB") == Language::English &&
+                exchange::languageFromLocale("zh_TW") == Language::TraditionalChinese &&
+                exchange::languageFromLocale("zh_HK") == Language::TraditionalChinese &&
+                exchange::languageFromLocale("ja_JP") == Language::Japanese &&
+                exchange::languageFromLocale("ko_KR") == Language::SimplifiedChinese,
+            "Minecraft client locale mapping and fallback");
+    require(exchange::localeCode(Language::SimplifiedChinese) == "zh_CN" &&
+                exchange::localeCode(Language::English) == "en_US" &&
+                exchange::localeCode(Language::TraditionalChinese) == "zh_TW" &&
+                exchange::localeCode(Language::Japanese) == "ja_JP",
+            "canonical locale codes");
+
+    require(exchange::tradeActionLabel(exchange::TradeAction::MarketBuy, Language::SimplifiedChinese) ==
+                "直接购买" &&
+                exchange::tradeActionLabel(exchange::TradeAction::MarketBuy, Language::English) == "Buy now" &&
+                exchange::tradeActionLabel(exchange::TradeAction::MarketBuy, Language::TraditionalChinese) ==
+                    "直接購買" &&
+                exchange::tradeActionLabel(exchange::TradeAction::MarketBuy, Language::Japanese) == "すぐ購入",
+            "trade action labels follow client language");
+
+    const exchange::ItemPrototype item{"minecraft:emerald_block", 0, {}, "Emerald Block"};
+    const auto simplified = exchange::describeItemRequirements(item, Language::SimplifiedChinese, "绿宝石块");
+    const auto english = exchange::describeItemRequirements(item, Language::English, "Emerald Block");
+    const auto traditional = exchange::describeItemRequirements(item, Language::TraditionalChinese, "綠寶石方塊");
+    const auto japanese = exchange::describeItemRequirements(item, Language::Japanese, "エメラルドブロック");
+    require(simplified.find("物品：绿宝石块") != std::string::npos &&
+                simplified.find("附魔：无") != std::string::npos,
+            "simplified Chinese item requirements");
+    require(english.find("Item: Emerald Block") != std::string::npos &&
+                english.find("Enchantments: none") != std::string::npos,
+            "English item requirements");
+    require(traditional.find("物品：綠寶石方塊") != std::string::npos &&
+                traditional.find("附魔：無") != std::string::npos,
+            "traditional Chinese item requirements");
+    require(japanese.find("アイテム：エメラルドブロック") != std::string::npos &&
+                japanese.find("エンチャント：なし") != std::string::npos,
+            "Japanese item requirements");
+
+    for (const auto [language, expected] :
+         std::array<std::pair<Language, std::string_view>, 4>{{
+             {Language::SimplifiedChinese, "数量必须是 1 至 640 的整数"},
+             {Language::English, "Quantity must be a whole number from 1 to 640"},
+             {Language::TraditionalChinese, "數量必須是 1 至 640 的整數"},
+             {Language::Japanese, "数量は 1～640 の整数で入力してください"},
+         }}) {
+        std::string error_text;
+        try {
+            static_cast<void>(exchange::parseTradeQuantity("641", 640, language));
+        } catch (const exchange::UserError &error) {
+            error_text = error.what();
+        }
+        require(error_text == expected, "localized quantity validation error");
+    }
+    const exchange::UserError player_error("visible");
+    const std::runtime_error internal_error("database detail");
+    require(exchange::userFacingError(Language::English, player_error) == "visible" &&
+                exchange::userFacingError(Language::English, internal_error) ==
+                    exchange::messageText(Language::English, Message::UnexpectedError),
+            "internal errors must not leak while validated errors stay specific");
+}
+
 void testInteractionGate() {
     using namespace std::chrono_literals;
     exchange::InteractionGate gate(750ms);
@@ -221,6 +297,16 @@ float readLittleFloat(const std::string_view payload, std::size_t &offset) {
     return std::bit_cast<float>(bits);
 }
 
+std::string readProtocolString(const std::string_view payload, std::size_t &offset) {
+    const auto size = readVarUint(payload, offset);
+    if (size > payload.size() - offset) {
+        throw std::runtime_error("truncated test string");
+    }
+    auto result = std::string(payload.substr(offset, static_cast<std::size_t>(size)));
+    offset += static_cast<std::size_t>(size);
+    return result;
+}
+
 void testHologramAppearancePacket() {
     const auto payload = exchange::hologramAppearancePacket(300);
     std::size_t offset = 0;
@@ -242,6 +328,14 @@ void testHologramAppearancePacket() {
     require(readVarUint(payload, offset) == 0 && readVarUint(payload, offset) == 0 &&
                 readVarUint(payload, offset) == 0 && offset == payload.size(),
             "hologram packet empty properties and tick");
+
+    const auto localized_payload = exchange::hologramAppearancePacket(301, "§aBuying 10u x 5§r");
+    offset = 0;
+    require(readVarUint(localized_payload, offset) == 301 && readVarUint(localized_payload, offset) == 5,
+            "localized hologram packet metadata count");
+    require(readVarUint(localized_payload, offset) == 4 && readVarUint(localized_payload, offset) == 4 &&
+                readProtocolString(localized_payload, offset) == "§aBuying 10u x 5§r",
+            "localized hologram packet must override the name for one client");
 }
 
 void testMarketDisplay() {
@@ -264,6 +358,13 @@ void testMarketDisplay() {
     for (const auto banned : {"\u76d8\u53e3", "\u4e70\u4e00", "\u5356\u4e00", "\u4e70\u76d8", "\u5356\u76d8"}) {
         require(text.find(banned) == std::string::npos, "floating text must not use stock-market wording");
     }
+    require(exchange::marketHologramText(market, book, exchange::Language::English)
+                    .find("Buying 10u x 5") != std::string::npos &&
+                exchange::marketHologramText(market, book, exchange::Language::TraditionalChinese)
+                        .find("收購 10u x 5") != std::string::npos &&
+                exchange::marketHologramText(market, book, exchange::Language::Japanese)
+                        .find("購入希望 10u x 5") != std::string::npos,
+            "floating text follows each recipient's language");
 
     const exchange::HologramAnchor anchor{"Overworld", 10.5F, 65.0F, 20.5F};
     auto moved = anchor;
@@ -1037,6 +1138,7 @@ int main() {
         testNbtCodec();
         testConfig();
         testTradeFormFlow();
+        testLocalization();
         testInteractionGate();
         testHologramAppearancePacket();
         testMarketDisplay();

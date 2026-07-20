@@ -4,6 +4,7 @@
 #include "endstone_exchange/domain.hpp"
 #include "endstone_exchange/exchange_service.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
+#include "endstone_exchange/localization.hpp"
 #include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/trade_form.hpp"
 
@@ -92,11 +93,13 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] int claimDeliveries(endstone::Player &player, bool announce = true);
     void queueInventoryResync(endstone::Player &player);
     void giveExchanger(endstone::Player &player);
+    void localizeExchangers(endstone::Player &player);
 
     void refreshHolograms();
     void refreshHologram(const Market &market);
     void refreshHologram(const Market &market, const OrderBook &book);
-    void sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient = nullptr) const;
+    void sendHologramAppearance(const endstone::Actor &hologram, const Market &market, const OrderBook &book,
+                                endstone::Player *recipient = nullptr) const;
     void queuePlayerHologramSync(endstone::Player &player, bool recreate_if_pending);
     void syncHologramsForPlayer(endstone::Player &player) const;
     [[nodiscard]] bool recreateHologramsNearPlayer(endstone::Player &player);
@@ -111,6 +114,8 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] bool isTargetChunkSpawnReady(const Market &market) const;
     [[nodiscard]] bool marketTargetsChunk(const Market &market, std::string_view dimension_name, int chunk_x,
                                           int chunk_z) const;
+    [[nodiscard]] Language languageFor(const endstone::CommandSender &sender) const noexcept;
+    [[nodiscard]] std::string localizedItemName(const ItemPrototype &item, Language language) const;
 
     [[nodiscard]] static std::string formatMoney(Cents cents);
     [[nodiscard]] static std::string targetTag(Id market_id);

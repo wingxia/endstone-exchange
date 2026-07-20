@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.4.4 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ set(EXCHANGE_CORE_SOURCES
     src/hologram_packet.cpp
     src/interaction_gate.cpp
     src/item_identity.cpp
+    src/localization.cpp
     src/market_display.cpp
     src/trade_form.cpp
 )

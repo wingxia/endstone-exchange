@@ -22,14 +22,13 @@ std::string_view trim(const std::string_view text) noexcept {
 }
 
 std::int64_t parseWholeNumber(const std::string_view raw, const std::int64_t minimum,
-                              const std::int64_t maximum, const std::string_view field) {
+                              const std::int64_t maximum, const Message field, const Language language) {
     const auto text = trim(raw);
     std::int64_t value = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     if (text.empty() || error != std::errc{} || end != text.data() + text.size() || value < minimum ||
         value > maximum) {
-        throw std::runtime_error(std::string(field) + "必须是 " + std::to_string(minimum) + " 至 " +
-                                 std::to_string(maximum) + " 的整数");
+        throw UserError(tr(language, Message::WholeNumberRange, messageText(language, field), minimum, maximum));
     }
     return value;
 }
@@ -48,18 +47,18 @@ OrderType tradeActionOrderType(const TradeAction action) noexcept {
     return tradeActionUsesPrice(action) ? OrderType::Limit : OrderType::Market;
 }
 
-std::string_view tradeActionLabel(const TradeAction action) noexcept {
+std::string_view tradeActionLabel(const TradeAction action, const Language language) noexcept {
     switch (action) {
     case TradeAction::LimitBuy:
-        return "按我的价格购买";
+        return messageText(language, Message::TradeActionLimitBuy);
     case TradeAction::LimitSell:
-        return "按我的价格出售";
+        return messageText(language, Message::TradeActionLimitSell);
     case TradeAction::MarketBuy:
-        return "直接购买";
+        return messageText(language, Message::TradeActionMarketBuy);
     case TradeAction::MarketSell:
-        return "直接出售";
+        return messageText(language, Message::TradeActionMarketSell);
     }
-    return "交易";
+    return messageText(language, Message::TradeActionFallback);
 }
 
 std::vector<TradeAction> availableTradeActions(const bool has_bids, const bool has_asks) {
@@ -75,7 +74,7 @@ std::vector<TradeAction> availableTradeActions(const bool has_bids, const bool h
 
 Cents defaultTradePrice(const Cents minimum, const Cents maximum, const Cents step, const Cents reference) {
     if (minimum <= 0 || maximum < minimum || step <= 0) {
-        throw std::runtime_error("价格范围无效");
+        throw std::runtime_error("invalid price range");
     }
     const auto clamped = std::clamp(reference, minimum, maximum);
     auto steps = (clamped - minimum) / step;
@@ -86,7 +85,7 @@ Cents defaultTradePrice(const Cents minimum, const Cents maximum, const Cents st
     return minimum + steps * step;
 }
 
-std::vector<std::string> textFormValues(const std::string_view response) {
+std::vector<std::string> textFormValues(const std::string_view response, const Language language) {
     std::vector<std::string> values;
     std::size_t index = 0;
     const auto skip_whitespace = [&] {
@@ -94,7 +93,7 @@ std::vector<std::string> textFormValues(const std::string_view response) {
             ++index;
         }
     };
-    const auto invalid = [] { throw std::runtime_error("客户端返回了无效表单数据"); };
+    const auto invalid = [language] { throw UserError(tr(language, Message::InvalidFormData)); };
 
     skip_whitespace();
     if (index >= response.size() || response[index++] != '[') {
@@ -113,7 +112,7 @@ std::vector<std::string> textFormValues(const std::string_view response) {
     bool array_closed = false;
     while (index < response.size()) {
         if (response[index++] != '"') {
-            throw std::runtime_error("客户端返回了无效表单数据");
+            invalid();
         }
         std::string value;
         bool closed = false;
@@ -187,25 +186,26 @@ std::vector<std::string> textFormValues(const std::string_view response) {
     return values;
 }
 
-int parseTradeQuantity(const std::string_view text, const int maximum) {
+int parseTradeQuantity(const std::string_view text, const int maximum, const Language language) {
     if (maximum < 1) {
-        throw std::runtime_error("交易数量范围无效");
+        throw UserError(tr(language, Message::QuantityRangeInvalid));
     }
-    return static_cast<int>(parseWholeNumber(text, 1, maximum, "数量"));
+    return static_cast<int>(parseWholeNumber(text, 1, maximum, Message::QuantityField, language));
 }
 
-Cents parseTradePrice(const std::string_view text, const Cents minimum, const Cents maximum, const Cents step) {
+Cents parseTradePrice(const std::string_view text, const Cents minimum, const Cents maximum, const Cents step,
+                      const Language language) {
     if (minimum <= 0 || maximum < minimum || step <= 0 || minimum % 100 != 0 || maximum % 100 != 0 ||
         step % 100 != 0) {
-        throw std::runtime_error("价格范围无效");
+        throw UserError(tr(language, Message::PriceRangeInvalid));
     }
-    const auto units = parseWholeNumber(text, minimum / 100, maximum / 100, "每件价格");
+    const auto units = parseWholeNumber(text, minimum / 100, maximum / 100, Message::UnitPriceField, language);
     if (units > std::numeric_limits<Cents>::max() / 100) {
-        throw std::runtime_error("每件价格超出允许范围");
+        throw UserError(tr(language, Message::PriceTooLarge));
     }
     const auto cents = units * 100;
     if ((cents - minimum) % step != 0) {
-        throw std::runtime_error("每件价格必须按 " + std::to_string(step / 100) + "u 调整");
+        throw UserError(tr(language, Message::PriceStep, step / 100));
     }
     return cents;
 }

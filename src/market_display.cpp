@@ -51,13 +51,16 @@ std::string formatUnitPrice(const Cents cents) {
     return std::format("{}u", cents / 100);
 }
 
-std::string marketHologramText(const Market &market, const OrderBook &book) {
+std::string marketHologramText(const Market &market, const OrderBook &book, const Language language,
+                               const std::string_view localized_item_name) {
     const auto wanted_price = book.bids.empty() ? std::string("--") : formatUnitPrice(book.bids.front().price_cents);
     const auto offered_price = book.asks.empty() ? std::string("--") : formatUnitPrice(book.asks.front().price_cents);
     const auto wanted_quantity = book.bids.empty() ? 0 : book.bids.front().quantity;
     const auto offered_quantity = book.asks.empty() ? 0 : book.asks.front().quantity;
-    return std::format("§6{}§r\n§a收购 {} x {}§r\n§c出售 {} x {}§r", market.item.name, wanted_price,
-                       wanted_quantity, offered_price, offered_quantity);
+    const auto item_name = localized_item_name.empty() ? std::string_view(market.item.name) : localized_item_name;
+    return std::format("§6{}§r\n§a{} {} x {}§r\n§c{} {} x {}§r", item_name,
+                       messageText(language, Message::HologramWanted), wanted_price, wanted_quantity,
+                       messageText(language, Message::HologramForSale), offered_price, offered_quantity);
 }
 
 } // namespace exchange

@@ -10,7 +10,8 @@ This implementation is pinned to the latest verified stable release, Endstone v0
 | Read/write player inventory | `PlayerInventory`, slot access, offhand access and `addItem` | Public API; exact identity is compared from type, data value and NBT instead of runtime `ItemMeta::isSimilar` state |
 | Preserve custom item data | `ItemStack::getNbt()` / `setNbt()` | Public API plus a deterministic plugin-side codec for SQL storage |
 | Trading UI | `ActionForm`, `Button`, `ModalForm`, and `TextInput` | Public API; actions are rebuilt from the current order book, and direct-trade input forms contain quantity only |
-| Floating trade text | `Dimension::spawnActor`, `Dimension::getLoadedChunks`, `ChunkLoadEvent`, `PlayerMoveEvent`, `Actor::setNameTag*`, `Player::sendPacket`, scheduler | One protected armor-stand nameplate per loaded trade point, plus delayed appearance re-sync after chunk load, player movement and reconnect |
+| Client language | `Player::getLocale()`, `ItemStack::getTranslationKey()`, and `Server::getLanguage()` | Public API; custom plugin messages use complete embedded catalogs for simplified Chinese, English, traditional Chinese and Japanese, while vanilla item names reuse Minecraft translations |
+| Floating trade text | `Dimension::spawnActor`, `Dimension::getLoadedChunks`, `ChunkLoadEvent`, `PlayerMoveEvent`, `Actor::setNameTag*`, `Player::sendPacket`, scheduler | One protected armor-stand nameplate per loaded trade point; its metadata name is generated per recipient locale, with delayed appearance re-sync after chunk load, player movement and reconnect |
 | Persistent targets | Block coordinates or persistent scoreboard tags on actors | Public API + MySQL |
 | Read an item frame's displayed item | Not exposed by `Block`/`BlockState` | Public `Server::dispatchCommand()` saves a namespaced structure; after an asynchronous 80-tick delay the plugin reads that structure's BlockActor NBT from the world LevelDB log, then deletes the capture |
 
@@ -28,4 +29,5 @@ Primary references:
 - [C++ PlayerInteractEvent](https://endstone.dev/latest/reference/cpp/classendstone_1_1PlayerInteractEvent/)
 - [C++ PlayerInteractActorEvent](https://endstone.dev/latest/reference/cpp/classendstone_1_1PlayerInteractActorEvent/)
 - [C++ Actor API](https://endstone.dev/latest/reference/cpp/classendstone_1_1Actor/)
+- [C++ Player locale API](https://endstone.dev/latest/reference/cpp/classendstone_1_1Player/#function-getlocale)
 - [Endstone forms reference](https://endstone.dev/latest/reference/python/form/)

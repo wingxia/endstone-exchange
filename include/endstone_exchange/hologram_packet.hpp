@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace exchange {
 
@@ -11,6 +13,7 @@ namespace exchange {
 // Bedrock clients.
 inline constexpr int SetActorDataPacketId = 39;
 
-[[nodiscard]] std::string hologramAppearancePacket(std::uint64_t runtime_id);
+[[nodiscard]] std::string hologramAppearancePacket(
+    std::uint64_t runtime_id, std::optional<std::string_view> name_tag = std::nullopt);
 
 } // namespace exchange

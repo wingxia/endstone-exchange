@@ -184,62 +184,64 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
     if (command.getName() != "exchange") {
         return false;
     }
+    const auto language = languageFor(sender);
     if (!ready_) {
-        sender.sendErrorMessage("交易功能尚未就绪，请查看服务端日志。");
+        sender.sendErrorMessage("{}", messageText(language, Message::PluginNotReady));
         return true;
     }
 
     try {
-        auto *player = dynamic_cast<endstone::Player *>(&sender);
+        auto *player = sender.asPlayer();
         if (args.empty()) {
             if (player != nullptr) {
                 service_->ensureAccount(player->getUniqueId().str(), player->getName());
-                sender.sendMessage("§6交易余额：§e{}§r",
-                                   formatMoney(service_->balance(player->getUniqueId().str())));
+                sender.sendMessage("{}", tr(language, Message::Balance,
+                                      formatMoney(service_->balance(player->getUniqueId().str()))));
             }
-            sender.sendMessage("/exchange give | balance | orders | claim | addbalance <玩家> <金额> | status");
+            sender.sendMessage("{}", messageText(language, Message::CommandHelp));
             return true;
         }
 
         const auto subcommand = lower(args.front());
         if (subcommand == "give") {
             if (!sender.hasPermission("exchange.admin")) {
-                sender.sendErrorMessage("你没有发放 exchanger 的权限。");
+                sender.sendErrorMessage("{}", messageText(language, Message::NoGivePermission));
                 return true;
             }
             auto *target = player;
             if (args.size() == 2) {
                 target = getServer().getPlayer(args[1]);
                 if (target == nullptr) {
-                    sender.sendErrorMessage("目标玩家不在线。");
+                    sender.sendErrorMessage("{}", messageText(language, Message::PlayerOffline));
                     return true;
                 }
             } else if (args.size() != 1 || target == nullptr) {
-                sender.sendErrorMessage("用法：/exchange give [在线玩家]");
+                sender.sendErrorMessage("{}", messageText(language, Message::GiveUsage));
                 return true;
             }
             if (!canAdmin(*target) && target == player) {
-                sender.sendErrorMessage("你没有使用 exchanger 开启交易的权限。");
+                sender.sendErrorMessage("{}", messageText(language, Message::NoMarketPermission));
                 return true;
             }
             giveExchanger(*target);
             if (target != player) {
-                sender.sendMessage("已向 {} 发放 exchanger。", target->getName());
+                sender.sendMessage("{}", tr(language, Message::GaveExchanger, target->getName()));
             }
             return true;
         }
         if (subcommand == "balance") {
             if (player == nullptr) {
-                sender.sendErrorMessage("控制台请使用 addbalance 或 status。");
+                sender.sendErrorMessage("{}", messageText(language, Message::ConsoleHint));
                 return true;
             }
             service_->ensureAccount(player->getUniqueId().str(), player->getName());
-            sender.sendMessage("§6交易余额：§e{}§r", formatMoney(service_->balance(player->getUniqueId().str())));
+            sender.sendMessage("{}", tr(language, Message::Balance,
+                                  formatMoney(service_->balance(player->getUniqueId().str()))));
             return true;
         }
         if (subcommand == "orders") {
             if (player == nullptr) {
-                sender.sendErrorMessage("该界面只能由玩家打开。");
+                sender.sendErrorMessage("{}", messageText(language, Message::PlayerFormOnly));
                 return true;
             }
             openOrdersForm(*player);
@@ -247,7 +249,7 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
         }
         if (subcommand == "claim") {
             if (player == nullptr) {
-                sender.sendErrorMessage("只有玩家可以领取物品。");
+                sender.sendErrorMessage("{}", messageText(language, Message::PlayerClaimOnly));
                 return true;
             }
             static_cast<void>(claimDeliveries(*player));
@@ -256,39 +258,44 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
         }
         if (subcommand == "addbalance") {
             if (!sender.hasPermission("exchange.admin") || args.size() != 3) {
-                sender.sendErrorMessage("用法：/exchange addbalance <在线玩家> <金额>");
+                sender.sendErrorMessage("{}", messageText(language, Message::AddBalanceUsage));
                 return true;
             }
             auto *target = getServer().getPlayer(args[1]);
             if (target == nullptr) {
-                sender.sendErrorMessage("目标玩家不在线。");
+                sender.sendErrorMessage("{}", messageText(language, Message::PlayerOffline));
                 return true;
             }
             std::size_t consumed = 0;
-            const double amount = std::stod(args[2], &consumed);
+            double amount = 0.0;
+            try {
+                amount = std::stod(args[2], &consumed);
+            } catch (const std::exception &) {
+                throw UserError(tr(language, Message::InvalidAmount));
+            }
             if (consumed != args[2].size() || !std::isfinite(amount)) {
-                throw std::runtime_error("金额格式无效");
+                throw UserError(tr(language, Message::InvalidAmount));
             }
             const auto raw_cents = static_cast<long double>(amount) * 100.0L;
             if (raw_cents < static_cast<long double>(std::numeric_limits<Cents>::min()) ||
                 raw_cents > static_cast<long double>(std::numeric_limits<Cents>::max())) {
-                throw std::runtime_error("金额超出允许范围");
+                throw UserError(tr(language, Message::AmountOutOfRange));
             }
             const auto cents = static_cast<Cents>(std::llround(raw_cents));
             const auto balance_cents = service_->addBalance(target->getUniqueId().str(), target->getName(), cents);
-            sender.sendMessage("{} 的交易余额现在是 {}。", target->getName(), formatMoney(balance_cents));
-            target->sendMessage("§6交易余额已调整为：§e{}§r", formatMoney(balance_cents));
+            sender.sendMessage("{}", tr(language, Message::PlayerBalanceNow, target->getName(),
+                                         formatMoney(balance_cents)));
+            target->sendMessage("{}", tr(languageFor(*target), Message::BalanceAdjusted, formatMoney(balance_cents)));
             return true;
         }
         if (subcommand == "status") {
             database_->ping();
-            sender.sendMessage("Exchange {}: database=OK, active_markets={}", ENDSTONE_EXCHANGE_VERSION,
-                               markets_.size());
+            sender.sendMessage("{}", tr(language, Message::StatusOk, ENDSTONE_EXCHANGE_VERSION, markets_.size()));
             return true;
         }
-        sender.sendErrorMessage("未知子命令。");
+        sender.sendErrorMessage("{}", messageText(language, Message::UnknownSubcommand));
     } catch (const std::exception &error) {
-        sender.sendErrorMessage("交易操作失败：{}", error.what());
+        sender.sendErrorMessage("{}", tr(language, Message::CommandFailed, userFacingError(language, error)));
         getLogger().warning("Command failed: {}", error.what());
     }
     return true;
@@ -303,7 +310,7 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
     auto &block = *event.getBlock();
     if (event.getItem() && isInternalEscrowItem(*event.getItem())) {
         event.cancel();
-        player.sendErrorMessage("该物品正在恢复，暂时不能使用。");
+        player.sendErrorMessage("{}", messageText(languageFor(player), Message::RecoveryCannotUse));
         return;
     }
     const auto key = blockTargetKey(block);
@@ -334,7 +341,7 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
     const auto held = player.getInventory().getItemInMainHand();
     if (held && isInternalEscrowItem(*held)) {
         event.cancel();
-        player.sendErrorMessage("该物品正在恢复，暂时不能使用。");
+        player.sendErrorMessage("{}", messageText(languageFor(player), Message::RecoveryCannotUse));
         return;
     }
     const bool exchanger = isExchanger(held);
@@ -349,7 +356,7 @@ void ExchangePlugin::onPlayerInteractActor(endstone::PlayerInteractActorEvent &e
     if (exchanger) {
         event.cancel();
         if (market_id && hasTag(actor, hologramTag(*market_id))) {
-            player.sendErrorMessage("交易提示不是可交易目标。");
+            player.sendErrorMessage("{}", messageText(languageFor(player), Message::HologramNotTarget));
             return;
         }
         toggleActor(player, actor);
@@ -365,7 +372,7 @@ void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
     }
     const auto key = blockTargetKey(event.getBlock());
     if (const auto it = target_index_.find(key); it != target_index_.end()) {
-        deactivate(&event.getPlayer(), it->second, "目标方块被破坏", false);
+        deactivate(&event.getPlayer(), it->second, "target block broken", false);
     }
 }
 
@@ -406,7 +413,7 @@ void ExchangePlugin::onActorRemove(endstone::ActorRemoveEvent &event) {
     }
     for (const auto &[market_id, market] : markets_) {
         if (market.target_kind == TargetKind::Actor && hasTag(actor, targetTag(market_id))) {
-            deactivate(nullptr, market_id, "目标实体已移除", false);
+            deactivate(nullptr, market_id, "target actor removed", false);
             return;
         }
     }
@@ -419,6 +426,7 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
     try {
         auto &player = event.getPlayer();
         open_trade_forms_.erase(player.getUniqueId().str());
+        localizeExchangers(player);
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
         static_cast<void>(claimDeliveries(player));
         queueInventoryResync(player);
@@ -489,7 +497,8 @@ void ExchangePlugin::onChunkUnload(endstone::ChunkUnloadEvent &event) {
 void ExchangePlugin::onPlayerDropItem(endstone::PlayerDropItemEvent &event) {
     if (isInternalEscrowItem(event.getItem())) {
         event.setCancelled(true);
-        event.getPlayer().sendErrorMessage("该物品正在恢复，暂时不能丢弃。");
+        auto &player = event.getPlayer();
+        player.sendErrorMessage("{}", messageText(languageFor(player), Message::RecoveryCannotDrop));
     }
 }
 
@@ -567,13 +576,14 @@ bool ExchangePlugin::acceptInteraction(const endstone::Player &player) {
 }
 
 void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &block) {
+    const auto language = languageFor(player);
     if (!canAdmin(player)) {
-        player.sendErrorMessage("你没有使用 exchanger 开启交易的权限。");
+        player.sendErrorMessage("{}", messageText(language, Message::NoMarketPermission));
         return;
     }
     const auto key = blockTargetKey(block);
     if (const auto it = target_index_.find(key); it != target_index_.end()) {
-        deactivate(&player, it->second, "管理员关闭", true);
+        deactivate(&player, it->second, "closed by administrator", true);
         return;
     }
     if (isItemFrameBlock(block.getType())) {
@@ -583,7 +593,7 @@ void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &bloc
     try {
         const auto prototype = prototypeForBlock(block);
         if (!prototype) {
-            player.sendErrorMessage("该方块没有可交付的对应物品，不能设为可交易。");
+            player.sendErrorMessage("{}", messageText(language, Message::BlockNoItem));
             return;
         }
         Market market;
@@ -598,14 +608,15 @@ void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &bloc
         market = service_->activateMarket(market);
         indexMarket(market);
         refreshHologram(market);
-        player.sendMessage("§a已将该物体设为可交易：§f{}§r", market.item.name);
+        player.sendMessage("{}", tr(language, Message::ObjectEnabled, localizedItemName(market.item, language)));
     } catch (const std::exception &error) {
-        player.sendErrorMessage("开启交易失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::ActivationFailed, userFacingError(language, error)));
         getLogger().warning("Block activation failed: {}", error.what());
     }
 }
 
 void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Block &block) {
+    const auto language = languageFor(player);
     const auto key = blockTargetKey(block);
     if (const auto pending = pending_frame_captures_.find(key); pending != pending_frame_captures_.end()) {
         if (config_.market.cleanup_structure_captures) {
@@ -613,13 +624,13 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                                                           std::format("structure delete {}", pending->second)));
         }
         pending_frame_captures_.erase(pending);
-        player.sendMessage("§e已取消展示框的可交易设置。§r");
+        player.sendMessage("{}", messageText(language, Message::FrameCanceled));
         return;
     }
 
     const auto *level = getServer().getLevel();
     if (level == nullptr) {
-        player.sendErrorMessage("世界尚未加载。");
+        player.sendErrorMessage("{}", messageText(language, Message::WorldNotLoaded));
         return;
     }
     const auto serial = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -637,10 +648,10 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
     pending_frame_captures_[key] = structure_name;
     if (!getServer().dispatchCommand(getServer().getCommandSender(), command)) {
         pending_frame_captures_.erase(key);
-        player.sendErrorMessage("无法读取展示框内容。");
+        player.sendErrorMessage("{}", messageText(language, Message::FrameReadFailed));
         return;
     }
-    player.sendMessage("§e正在读取展示框内容，约 4 秒后完成设置；再次右击可取消。§r");
+    player.sendMessage("{}", messageText(language, Message::FrameReading));
 
     static_cast<void>(getServer().getScheduler().runTaskLater(
         *this,
@@ -660,6 +671,8 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
             if (notify != nullptr && notify->getUniqueId().str() != player_uuid) {
                 notify = nullptr;
             }
+            const auto notify_language =
+                notify == nullptr ? Language::SimplifiedChinese : languageFor(*notify);
             try {
                 if (!ready_) {
                     cleanup();
@@ -671,7 +684,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                 auto *dimension = current_level == nullptr ? nullptr : current_level->getDimension(dimension_name);
                 auto current_block = dimension == nullptr ? nullptr : dimension->getBlockAt(x, y, z);
                 if (!current_block || !isItemFrameBlock(current_block->getType())) {
-                    throw std::runtime_error("展示框已不存在");
+                    throw UserError(tr(notify_language, Message::FrameMissing));
                 }
                 if (target_index_.contains(key)) {
                     cleanup();
@@ -688,7 +701,7 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                     prototype = prototypeForBlock(*current_block);
                 }
                 if (!prototype) {
-                    throw std::runtime_error("展示框没有可交付的对应物品");
+                    throw UserError(tr(notify_language, Message::FrameNoItem));
                 }
 
                 Market market;
@@ -704,13 +717,15 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
                 indexMarket(market);
                 refreshHologram(market);
                 if (notify != nullptr) {
-                    notify->sendMessage("§a已将展示框设为可交易：§f{}§r", market.item.name);
+                    notify->sendMessage("{}", tr(notify_language, Message::FrameEnabled,
+                                                 localizedItemName(market.item, notify_language)));
                 }
                 cleanup();
             } catch (const std::exception &error) {
                 cleanup();
                 if (notify != nullptr) {
-                    notify->sendErrorMessage("开启展示框交易失败：{}", error.what());
+                    notify->sendErrorMessage("{}", tr(notify_language, Message::FrameActivationFailed,
+                                                      userFacingError(notify_language, error)));
                 }
                 getLogger().warning("Item-frame activation failed: {}", error.what());
             }
@@ -719,18 +734,19 @@ void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Bl
 }
 
 void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &actor) {
+    const auto language = languageFor(player);
     if (!canAdmin(player)) {
-        player.sendErrorMessage("你没有使用 exchanger 开启交易的权限。");
+        player.sendErrorMessage("{}", messageText(language, Message::NoMarketPermission));
         return;
     }
     if (const auto market_id = marketIdForActor(actor)) {
-        deactivate(&player, *market_id, "管理员关闭", true);
+        deactivate(&player, *market_id, "closed by administrator", true);
         return;
     }
     try {
         const auto prototype = prototypeForActor(actor);
         if (!prototype) {
-            player.sendErrorMessage("该实体没有可交付的物品或刷怪蛋，不能设为可交易。");
+            player.sendErrorMessage("{}", messageText(language, Message::ActorNoItem));
             return;
         }
         Market market;
@@ -744,9 +760,9 @@ void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &acto
         static_cast<void>(actor.addScoreboardTag(targetTag(market.id)));
         indexMarket(market);
         refreshHologram(market);
-        player.sendMessage("§a已将该实体设为可交易：§f{}§r", market.item.name);
+        player.sendMessage("{}", tr(language, Message::ActorEnabled, localizedItemName(market.item, language)));
     } catch (const std::exception &error) {
-        player.sendErrorMessage("开启交易失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::ActivationFailed, userFacingError(language, error)));
         getLogger().warning("Actor activation failed: {}", error.what());
     }
 }
@@ -771,16 +787,19 @@ void ExchangePlugin::deactivate(endstone::Player *player, const Id market_id, co
         removeHologram(market_id);
         unindexMarket(market_id);
         if (player != nullptr) {
+            const auto language = languageFor(*player);
             if (preserve_orders) {
-                player->sendMessage("§e交易点已关闭；未完成订单和暂存的余额、物品保持不变，重新开启同一种物品后继续交易。§r");
+                player->sendMessage("{}", messageText(language, Message::MarketClosedPreserved));
             } else {
-                player->sendMessage("§e交易点已移除；未完成订单已取消，余额和物品已退回或等待领取。§r");
+                player->sendMessage("{}", messageText(language, Message::MarketRemoved));
             }
         }
         getLogger().info("Market {} deactivated: {} (orders_preserved={})", market_id, reason, preserve_orders);
     } catch (const std::exception &error) {
         if (player != nullptr) {
-            player->sendErrorMessage("关闭交易失败：{}", error.what());
+            const auto language = languageFor(*player);
+            player->sendErrorMessage("{}",
+                                     tr(language, Message::MarketCloseFailed, userFacingError(language, error)));
         }
         getLogger().warning("Market {} deactivation failed: {}", market_id, error.what());
     }
@@ -909,6 +928,7 @@ void ExchangePlugin::queueTradeSubmission(endstone::Player &player, const Id mar
 
 void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id) {
     const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
     if (!open_trade_forms_.insert(player_uuid).second) {
         return;
     }
@@ -916,7 +936,7 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
             open_trade_forms_.erase(player_uuid);
-            player.sendErrorMessage("这个交易点已经关闭。");
+            player.sendErrorMessage("{}", messageText(language, Message::TradePointClosed));
             return;
         }
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
@@ -926,14 +946,14 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto account_balance = service_->balance(player.getUniqueId().str());
         const auto sellable_quantity = sellableItemCount(player.getInventory(), market_it->second.item);
 
-        std::string book_text = "§a有人要买§r\n";
+        std::string book_text(messageText(language, Message::BookWanted));
         if (book.bids.empty()) {
             book_text += "  --\n";
         }
         for (const auto &level : book.bids) {
             book_text += std::format("  §a{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
         }
-        book_text += "§c有人在卖§r\n";
+        book_text += messageText(language, Message::BookForSale);
         if (book.asks.empty()) {
             book_text += "  --\n";
         }
@@ -951,24 +971,25 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         }
         const auto default_price = defaultTradePrice(config_.market.price_min_cents, config_.market.price_max_cents,
                                                      config_.market.price_step_cents, reference);
-        const auto item_requirements = describeItemRequirements(market_it->second.item);
+        const auto item_name = localizedItemName(market_it->second.item, language);
+        const auto item_requirements = describeItemRequirements(market_it->second.item, language, item_name);
 
         endstone::ActionForm form;
-        form.setTitle("交易 · " + market_it->second.item.name)
-            .addHeader("当前交易")
+        form.setTitle(tr(language, Message::TradeTitle, item_name))
+            .addHeader(std::string(messageText(language, Message::CurrentTrade)))
             .addLabel(book_text)
-            .addLabel("§6余额：§e" + formatMoney(account_balance) + "§r")
-            .addLabel(std::format("§6可出售：§e{} 件§r\n§6出售要求§r\n{}", sellable_quantity, item_requirements))
+            .addLabel(tr(language, Message::BalanceLabel, formatMoney(account_balance)))
+            .addLabel(tr(language, Message::SellableRequirements, sellable_quantity, item_requirements))
             .addDivider()
-            .addHeader("选择交易方式");
+            .addHeader(std::string(messageText(language, Message::ChooseTradeAction)));
 
         const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
         for (const auto action : actions) {
-            auto button_text = std::string(tradeActionLabel(action));
+            auto button_text = std::string(tradeActionLabel(action, language));
             if (action == TradeAction::MarketBuy) {
-                button_text += "\n按当前出售价格购买";
+                button_text += messageText(language, Message::DirectBuySubtitle);
             } else if (action == TradeAction::MarketSell) {
-                button_text += "\n按当前收购价格出售";
+                button_text += messageText(language, Message::DirectSellSubtitle);
             }
             form.addButton(button_text, std::nullopt,
                            [this, market_id, action, default_price, player_uuid](endstone::Player *form_player) {
@@ -982,22 +1003,23 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
             });
         }
         if (book.asks.empty()) {
-            form.addLabel("当前没有人在出售，暂不显示直接购买。");
+            form.addLabel(std::string(messageText(language, Message::NoDirectBuy)));
         }
         if (book.bids.empty()) {
-            form.addLabel("当前没有人在收购，暂不显示直接出售。");
+            form.addLabel(std::string(messageText(language, Message::NoDirectSell)));
         }
         form.setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
         open_trade_forms_.erase(player_uuid);
-        player.sendErrorMessage("打开交易界面失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::OpenTradeFailed, userFacingError(language, error)));
         getLogger().warning("Open form failed: {}", error.what());
     }
 }
 
 void ExchangePlugin::openTradeInputForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
     const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
     if (!open_trade_forms_.insert(player_uuid).second) {
         return;
     }
@@ -1005,30 +1027,33 @@ void ExchangePlugin::openTradeInputForm(endstone::Player &player, const Id marke
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
             open_trade_forms_.erase(player_uuid);
-            player.sendErrorMessage("这个交易点已经关闭。");
+            player.sendErrorMessage("{}", messageText(language, Message::TradePointClosed));
             return;
         }
         const auto book = service_->orderBook(market_id, 1);
         const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
         if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
             open_trade_forms_.erase(player_uuid);
-            player.sendErrorMessage("对应的订单已经没有了，请重新选择交易方式。");
+            player.sendErrorMessage("{}", messageText(language, Message::MatchingOrderGone));
             queueTradeForm(player, market_id);
             return;
         }
 
         endstone::ModalForm form;
-        form.setTitle(std::string(tradeActionLabel(draft.action)) + " · " + market_it->second.item.name)
+        const auto item_name = localizedItemName(market_it->second.item, language);
+        form.setTitle(std::string(tradeActionLabel(draft.action, language)) + " · " + item_name)
             .addControl(endstone::TextInput(
-                std::format("数量（1 至 {}）", config_.market.max_order_quantity), "请输入整数",
+                tr(language, Message::QuantityInput, config_.market.max_order_quantity),
+                std::string(messageText(language, Message::IntegerPlaceholder)),
                 std::to_string(draft.quantity)));
         if (tradeActionUsesPrice(draft.action)) {
             form.addControl(endstone::TextInput(
-                std::format("每件价格（{} 至 {}，只填整数）", formatUnitPrice(config_.market.price_min_cents),
-                            formatUnitPrice(config_.market.price_max_cents)),
-                "例如 10", std::to_string(draft.price_cents / 100)));
+                tr(language, Message::UnitPriceInput, formatUnitPrice(config_.market.price_min_cents),
+                   formatUnitPrice(config_.market.price_max_cents)),
+                std::string(messageText(language, Message::PricePlaceholder)),
+                std::to_string(draft.price_cents / 100)));
         }
-        form.setSubmitButton("继续")
+        form.setSubmitButton(std::string(messageText(language, Message::ContinueButton)))
             .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); })
             .setOnSubmit([this, market_id, draft, player_uuid](endstone::Player *form_player, std::string response) {
                 open_trade_forms_.erase(player_uuid);
@@ -1037,34 +1062,40 @@ void ExchangePlugin::openTradeInputForm(endstone::Player &player, const Id marke
                 }
                 form_player->closeForm();
                 try {
-                    const auto values = textFormValues(response);
+                    const auto form_language = languageFor(*form_player);
+                    const auto values = textFormValues(response, form_language);
                     const auto expected_values = tradeActionUsesPrice(draft.action) ? 2U : 1U;
                     if (values.size() != expected_values) {
-                        throw std::runtime_error("客户端返回了无效表单数据");
+                        throw UserError(tr(form_language, Message::InvalidFormData));
                     }
                     auto updated = draft;
-                    updated.quantity = parseTradeQuantity(values[0], config_.market.max_order_quantity);
+                    updated.quantity =
+                        parseTradeQuantity(values[0], config_.market.max_order_quantity, form_language);
                     if (tradeActionUsesPrice(draft.action)) {
                         updated.price_cents =
                             parseTradePrice(values[1], config_.market.price_min_cents,
-                                            config_.market.price_max_cents, config_.market.price_step_cents);
+                                            config_.market.price_max_cents, config_.market.price_step_cents,
+                                            form_language);
                     }
                     queueTradeReviewForm(*form_player, market_id, updated);
                 } catch (const std::exception &error) {
-                    form_player->sendErrorMessage("填写有误：{}。", error.what());
+                    const auto form_language = languageFor(*form_player);
+                    form_player->sendErrorMessage(
+                        "{}", tr(form_language, Message::InputInvalid, userFacingError(form_language, error)));
                     queueTradeInputForm(*form_player, market_id, draft);
                 }
             });
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
         open_trade_forms_.erase(player_uuid);
-        player.sendErrorMessage("打开交易填写界面失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::OpenInputFailed, userFacingError(language, error)));
         getLogger().warning("Open trade input form failed: {}", error.what());
     }
 }
 
 void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
     const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
     if (!open_trade_forms_.insert(player_uuid).second) {
         return;
     }
@@ -1072,28 +1103,29 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
             open_trade_forms_.erase(player_uuid);
-            player.sendErrorMessage("这个交易点已经关闭。");
+            player.sendErrorMessage("{}", messageText(language, Message::TradePointClosed));
             return;
         }
         const auto book = service_->orderBook(market_id, 1);
         const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
         if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
             open_trade_forms_.erase(player_uuid);
-            player.sendErrorMessage("对应的订单已经没有了，请重新选择交易方式。");
+            player.sendErrorMessage("{}", messageText(language, Message::MatchingOrderGone));
             queueTradeForm(player, market_id);
             return;
         }
 
         endstone::ActionForm form;
-        form.setTitle("确认交易 · " + market_it->second.item.name)
-            .addHeader(std::string(tradeActionLabel(draft.action)))
-            .addLabel(std::format("数量：{} 件", draft.quantity));
+        const auto item_name = localizedItemName(market_it->second.item, language);
+        form.setTitle(tr(language, Message::ConfirmTitle, item_name))
+            .addHeader(std::string(tradeActionLabel(draft.action, language)))
+            .addLabel(tr(language, Message::QuantityValue, draft.quantity));
         if (tradeActionUsesPrice(draft.action)) {
-            form.addLabel("每件价格：" + formatUnitPrice(draft.price_cents));
+            form.addLabel(tr(language, Message::UnitPriceValue, formatUnitPrice(draft.price_cents)));
         } else if (draft.action == TradeAction::MarketBuy) {
-            form.addLabel("将从当前最低出售价格开始购买，直到数量完成或没有可买物品。");
+            form.addLabel(std::string(messageText(language, Message::MarketBuyExplanation)));
         } else {
-            form.addLabel("将从当前最高收购价格开始出售，直到数量完成或没有人继续收购。");
+            form.addLabel(std::string(messageText(language, Message::MarketSellExplanation)));
         }
 
         auto review_callback = [this, market_id, player_uuid](const TradeDraft next) {
@@ -1107,14 +1139,13 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
             };
         };
 
-        form.addDivider().addHeader(
-            std::format("调整数量（1 至 {}）", config_.market.max_order_quantity));
+        form.addDivider().addHeader(tr(language, Message::AdjustQuantity, config_.market.max_order_quantity));
         for (const int delta : {-100, -10, -1}) {
             auto next = draft;
             next.quantity = adjustTradeQuantity(draft.quantity, delta, config_.market.max_order_quantity);
             form.addButton(std::format("{}", delta), std::nullopt, review_callback(next));
         }
-        form.addButton(std::format("填写数量（当前 {}）", draft.quantity), std::nullopt,
+        form.addButton(tr(language, Message::ReenterQuantity, draft.quantity), std::nullopt,
                        [this, market_id, draft, player_uuid](endstone::Player *form_player) {
                            open_trade_forms_.erase(player_uuid);
                            if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
@@ -1130,16 +1161,16 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
         }
 
         if (tradeActionUsesPrice(draft.action)) {
-            form.addDivider().addHeader(std::format("调整每件价格（{} 至 {}）",
-                                                    formatUnitPrice(config_.market.price_min_cents),
-                                                    formatUnitPrice(config_.market.price_max_cents)));
+            form.addDivider().addHeader(tr(language, Message::AdjustPrice,
+                                           formatUnitPrice(config_.market.price_min_cents),
+                                           formatUnitPrice(config_.market.price_max_cents)));
             for (const int delta : {-100, -10, -1}) {
                 auto next = draft;
                 next.price_cents = adjustTradePrice(draft.price_cents, delta, config_.market.price_min_cents,
                                                     config_.market.price_max_cents);
                 form.addButton(std::format("{}u", delta), std::nullopt, review_callback(next));
             }
-            form.addButton(std::format("填写价格（当前 {}）", formatUnitPrice(draft.price_cents)), std::nullopt,
+            form.addButton(tr(language, Message::ReenterPrice, formatUnitPrice(draft.price_cents)), std::nullopt,
                            [this, market_id, draft, player_uuid](endstone::Player *form_player) {
                                open_trade_forms_.erase(player_uuid);
                                if (form_player == nullptr || !ready_ ||
@@ -1158,7 +1189,7 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
         }
 
         form.addDivider()
-            .addButton("§a确认交易§r", std::nullopt,
+            .addButton(std::string(messageText(language, Message::ConfirmButton)), std::nullopt,
                        [this, market_id, draft, player_uuid](endstone::Player *form_player) {
                            open_trade_forms_.erase(player_uuid);
                            if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
@@ -1167,7 +1198,7 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
                            form_player->closeForm();
                            queueTradeSubmission(*form_player, market_id, draft);
                        })
-            .addButton("返回选择交易方式", std::nullopt,
+            .addButton(std::string(messageText(language, Message::BackActions)), std::nullopt,
                        [this, market_id, player_uuid](endstone::Player *form_player) {
                            open_trade_forms_.erase(player_uuid);
                            if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
@@ -1180,32 +1211,33 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
         open_trade_forms_.erase(player_uuid);
-        player.sendErrorMessage("打开交易确认界面失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::OpenReviewFailed, userFacingError(language, error)));
         getLogger().warning("Open trade review form failed: {}", error.what());
     }
 }
 
 void ExchangePlugin::submitTradeDraft(endstone::Player &player, const Id market_id, const TradeDraft &draft) {
+    const auto language = languageFor(player);
     try {
         if (draft.quantity < 1 || draft.quantity > config_.market.max_order_quantity) {
-            throw std::runtime_error("交易数量超出允许范围");
+            throw UserError(tr(language, Message::QuantityRangeInvalid));
         }
         if (tradeActionUsesPrice(draft.action) &&
             (draft.price_cents < config_.market.price_min_cents ||
              draft.price_cents > config_.market.price_max_cents ||
              (draft.price_cents - config_.market.price_min_cents) % config_.market.price_step_cents != 0 ||
              draft.price_cents % 100 != 0)) {
-            throw std::runtime_error("交易价格超出允许范围，或不是整数");
+            throw UserError(tr(language, Message::PriceRangeInvalid));
         }
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
-            throw std::runtime_error("交易点已经关闭");
+            throw UserError(tr(language, Message::TradePointClosed));
         }
         if (!tradeActionUsesPrice(draft.action)) {
             const auto book = service_->orderBook(market_id, 1);
             const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
             if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
-                throw std::runtime_error("对应的订单已经成交或取消，请重新打开交易界面");
+                throw UserError(tr(language, Message::MatchingOrderGone));
             }
         }
         OrderRequest request;
@@ -1230,37 +1262,40 @@ void ExchangePlugin::submitTradeDraft(endstone::Player &player, const Id market_
         refreshHologram(market_it->second);
         std::string delivery_note;
         if (delivered_items > 0) {
-            delivery_note = request.side == Side::Buy ? std::format("，已到账 {} 件", delivered_items)
-                                                      : std::format("，已返还 {} 件", delivered_items);
+            delivery_note = request.side == Side::Buy ? tr(language, Message::DeliveryReceived, delivered_items)
+                                                      : tr(language, Message::DeliveryReturned, delivered_items);
         }
         if (delivery_pending) {
-            delivery_note += "，另有物品待 /exchange claim 领取";
+            delivery_note += messageText(language, Message::DeliveryPending);
         }
 
         if (result.filled_quantity == 0 && result.open_quantity == 0) {
-            const auto unavailable = request.side == Side::Buy ? "出售这种物品" : "收购这种物品";
-            player.sendMessage("§e订单 #{} 未完成：当前没有其他玩家{}；自己的订单不会和自己交易{}。余额 {}。§r",
-                               result.order_id, unavailable, delivery_note, formatMoney(result.balance_cents));
+            const auto unavailable = messageText(
+                language, request.side == Side::Buy ? Message::OtherPlayerSelling : Message::OtherPlayerBuying);
+            player.sendMessage("{}", tr(language, Message::OrderNoFill, result.order_id, unavailable, delivery_note,
+                                        formatMoney(result.balance_cents)));
         } else if (result.filled_quantity == 0) {
-            player.sendMessage("§a订单 #{} 已保存：等待按每件 {} {} {} 件{}。余额 {}。§r", result.order_id,
-                               formatUnitPrice(request.price_cents), request.side == Side::Buy ? "购买" : "出售",
-                               result.open_quantity, delivery_note, formatMoney(result.balance_cents));
+            player.sendMessage(
+                "{}", tr(language, Message::OrderSaved, result.order_id, formatUnitPrice(request.price_cents),
+                         messageText(language, request.side == Side::Buy ? Message::BuyVerb : Message::SellVerb),
+                         result.open_quantity, delivery_note, formatMoney(result.balance_cents)));
         } else if (result.open_quantity > 0) {
-            player.sendMessage("§a订单 #{} 已完成 {} 件，剩余 {} 件继续等待，总金额 {}{}。余额 {}。§r",
-                               result.order_id, result.filled_quantity, result.open_quantity,
-                               formatMoney(result.gross_cents), delivery_note, formatMoney(result.balance_cents));
+            player.sendMessage("{}", tr(language, Message::OrderPartiallyFilled, result.order_id,
+                                        result.filled_quantity, result.open_quantity,
+                                        formatMoney(result.gross_cents), delivery_note,
+                                        formatMoney(result.balance_cents)));
         } else if (result.filled_quantity == result.requested_quantity) {
-            player.sendMessage("§a交易完成：订单 #{} 共 {} 件，总金额 {}{}。余额 {}。§r", result.order_id,
-                               result.filled_quantity, formatMoney(result.gross_cents), delivery_note,
-                               formatMoney(result.balance_cents));
+            player.sendMessage("{}", tr(language, Message::TradeCompleted, result.order_id,
+                                        result.filled_quantity, formatMoney(result.gross_cents), delivery_note,
+                                        formatMoney(result.balance_cents)));
         } else {
-            player.sendMessage("§a订单 #{} 已结束：完成 {}/{} 件，总金额 {}{}。余额 {}。§r", result.order_id,
-                               result.filled_quantity, result.requested_quantity, formatMoney(result.gross_cents),
-                               delivery_note, formatMoney(result.balance_cents));
+            player.sendMessage("{}", tr(language, Message::OrderEnded, result.order_id, result.filled_quantity,
+                                        result.requested_quantity, formatMoney(result.gross_cents), delivery_note,
+                                        formatMoney(result.balance_cents)));
         }
         queueInventoryResync(player);
     } catch (const std::exception &error) {
-        player.sendErrorMessage("交易失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::TradeFailed, userFacingError(language, error)));
         getLogger().warning("Trade submission failed for {}: {}", player.getName(), error.what());
         queueInventoryResync(player);
     }
@@ -1268,34 +1303,41 @@ void ExchangePlugin::submitTradeDraft(endstone::Player &player, const Id market_
 
 ExecutionResult ExchangePlugin::submitSellEscrow(endstone::Player &player, const OrderRequest &request) {
     auto &inventory = player.getInventory();
+    const auto language = languageFor(player);
     const auto escrow = service_->prepareSellEscrow(request);
     try {
-        const auto tagged = tagSellItems(inventory, escrow.item, escrow.requested_quantity, escrow.id);
+        const auto item_name = localizedItemName(escrow.item, language);
+        const auto tagged = tagSellItems(inventory, escrow.item, escrow.requested_quantity, escrow.id, language,
+                                         item_name);
         const auto persisted_tagged = taggedSellItems(inventory, escrow.id);
         if (persisted_tagged.quantity != tagged.quantity || persisted_tagged.stacks != tagged.stacks) {
-            throw std::runtime_error("出售物品没有完整进入暂存状态");
+            throw std::runtime_error("sell items were not fully tagged for escrow");
         }
         service_->markSellEscrowTagged(escrow.id, tagged.quantity, tagged.stacks);
-        replaceTaggedSellItemsWithReceipts(inventory, escrow.id);
+        replaceTaggedSellItemsWithReceipts(inventory, escrow.id, language);
         if (sellReceiptCount(inventory, escrow.id) != tagged.stacks) {
-            throw std::runtime_error("出售物品的暂存记录不一致，已保留恢复状态");
+            throw std::runtime_error("sell escrow receipt count does not match tagged stacks");
         }
         auto result = service_->executeSellEscrow(escrow.id);
         removeTaggedSellItems(inventory, escrow.id);
         removeSellReceipts(inventory, escrow.id);
         if (taggedSellItems(inventory, escrow.id).quantity != 0 || sellReceiptCount(inventory, escrow.id) != 0) {
-            throw std::runtime_error("出售物品的暂存标记尚未清除");
+            throw std::runtime_error("sell escrow markers were not fully cleared");
         }
         service_->markSellEscrowCleaned(escrow.id);
         return result;
     } catch (const std::exception &error) {
         const std::string original_error = error.what();
+        const bool player_facing = dynamic_cast<const UserError *>(&error) != nullptr;
         try {
             reconcileSellEscrows(player);
             return service_->executeSellEscrow(escrow.id);
         } catch (const std::exception &recovery_error) {
             getLogger().warning("Sell escrow {} remains recoverable for {}: {}", escrow.id, player.getName(),
                                 recovery_error.what());
+        }
+        if (player_facing) {
+            throw UserError(original_error);
         }
         throw std::runtime_error(original_error);
     }
@@ -1315,7 +1357,7 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
         if (claim->status == DeliveryClaimStatus::Applied) {
             clearDeliveryClaimTag(inventory, claim_id, claim->item);
             if (taggedItemCount(inventory, claim_id) != 0) {
-                throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim_id));
+                throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim_id));
             }
             if (!claim->cleaned) {
                 service_->markDeliveryClaimCleaned(claim_id);
@@ -1323,7 +1365,7 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
         } else if (claim->status == DeliveryClaimStatus::Canceled) {
             removeDeliveryClaimItems(inventory, claim_id);
             if (taggedItemCount(inventory, claim_id) != 0) {
-                throw std::runtime_error(std::format("已取消的交付标记 {} 尚未清除", claim_id));
+                throw std::runtime_error(std::format("canceled delivery marker {} was not cleared", claim_id));
             }
         }
     }
@@ -1340,7 +1382,7 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
             removeTaggedSellItems(inventory, escrow_id);
             removeSellReceipts(inventory, escrow_id);
             if (taggedSellItems(inventory, escrow_id).quantity != 0 || sellReceiptCount(inventory, escrow_id) != 0) {
-                throw std::runtime_error(std::format("出售暂存标记 {} 尚未从物品栏清除", escrow_id));
+                throw std::runtime_error(std::format("sell escrow marker {} was not cleared", escrow_id));
             }
             if (!escrow->cleaned) {
                 service_->markSellEscrowCleaned(escrow_id);
@@ -1349,7 +1391,7 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
             restoreTaggedSellItems(inventory, escrow_id, escrow->item);
             removeSellReceipts(inventory, escrow_id);
             if (taggedSellItems(inventory, escrow_id).quantity != 0 || sellReceiptCount(inventory, escrow_id) != 0) {
-                throw std::runtime_error(std::format("已取消的出售暂存标记 {} 尚未清除", escrow_id));
+                throw std::runtime_error(std::format("canceled sell escrow marker {} was not cleared", escrow_id));
             }
         }
     }
@@ -1357,6 +1399,7 @@ void ExchangePlugin::reconcileInternalEscrowMarkers(endstone::Player &player) {
 
 void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
     auto &inventory = player.getInventory();
+    const auto language = languageFor(player);
     for (auto escrow : service_->unfinishedSellEscrows(player.getUniqueId().str())) {
         if (escrow.status == SellEscrowStatus::Prepared) {
             const auto tagged = taggedSellItems(inventory, escrow.id);
@@ -1373,9 +1416,9 @@ void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
             escrow.status = SellEscrowStatus::Tagged;
         }
         if (escrow.status == SellEscrowStatus::Tagged) {
-            replaceTaggedSellItemsWithReceipts(inventory, escrow.id);
+            replaceTaggedSellItemsWithReceipts(inventory, escrow.id, language);
             if (sellReceiptCount(inventory, escrow.id) != escrow.receipt_count) {
-                throw std::runtime_error("暂存的出售物品尚未完整恢复");
+                throw std::runtime_error("sell escrow receipts were not fully restored");
             }
             static_cast<void>(service_->executeSellEscrow(escrow.id));
             escrow.status = SellEscrowStatus::Ordered;
@@ -1384,7 +1427,7 @@ void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
             removeTaggedSellItems(inventory, escrow.id);
             removeSellReceipts(inventory, escrow.id);
             if (taggedSellItems(inventory, escrow.id).quantity != 0 || sellReceiptCount(inventory, escrow.id) != 0) {
-                throw std::runtime_error("出售物品的暂存标记尚未完整清除");
+                throw std::runtime_error("sell escrow markers were not fully removed");
             }
             service_->markSellEscrowCleaned(escrow.id);
         }
@@ -1392,18 +1435,21 @@ void ExchangePlugin::reconcileSellEscrows(endstone::Player &player) {
 }
 
 void ExchangePlugin::openOrdersForm(endstone::Player &player) {
+    const auto language = languageFor(player);
     try {
         const auto player_uuid = player.getUniqueId().str();
         const auto orders = service_->openOrders(player_uuid);
         endstone::ActionForm form;
-        form.setTitle("我的未完成订单").addHeader("点击订单即可取消");
+        form.setTitle(std::string(messageText(language, Message::OrdersTitle)))
+            .addHeader(std::string(messageText(language, Message::OrdersHeader)));
         if (orders.empty()) {
-            form.addLabel("当前没有未完成订单。");
+            form.addLabel(std::string(messageText(language, Message::NoOpenOrders)));
         }
         for (const auto &order : orders) {
-            const auto text =
-                std::format("#{} {} {} × {}\n点击取消", order.id, order.side == Side::Buy ? "§a购买§r" : "§c出售§r",
-                            order.item_name, order.remaining_quantity);
+            const auto text = tr(language, Message::OrderButton, order.id,
+                                 messageText(language, order.side == Side::Buy ? Message::BuyColored
+                                                                              : Message::SellColored),
+                                 localizedItemName(order.item, language), order.remaining_quantity);
             form.addButton(text, std::nullopt, [this, order_id = order.id, player_uuid](endstone::Player *form_player) {
                 if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
                     return;
@@ -1413,15 +1459,18 @@ void ExchangePlugin::openOrdersForm(endstone::Player &player) {
                     static_cast<void>(claimDeliveries(*form_player));
                     queueInventoryResync(*form_player);
                     refreshHolograms();
-                    form_player->sendMessage("§a订单 #{} 已取消。§r", order_id);
+                    const auto form_language = languageFor(*form_player);
+                    form_player->sendMessage("{}", tr(form_language, Message::OrderCanceled, order_id));
                 } catch (const std::exception &error) {
-                    form_player->sendErrorMessage("取消订单失败：{}", error.what());
+                    const auto form_language = languageFor(*form_player);
+                    form_player->sendErrorMessage(
+                        "{}", tr(form_language, Message::CancelOrderFailed, userFacingError(form_language, error)));
                 }
             });
         }
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
-        player.sendErrorMessage("读取订单失败：{}", error.what());
+        player.sendErrorMessage("{}", tr(language, Message::ReadOrdersFailed, userFacingError(language, error)));
     }
 }
 
@@ -1445,7 +1494,7 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
             clearDeliveryClaimTag(inventory, claim.id, claim.item);
         }
         if (taggedItemCount(inventory, claim.id) != 0) {
-            throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim.id));
+            throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim.id));
         }
         service_->markDeliveryClaimCleaned(claim.id);
     }
@@ -1467,7 +1516,7 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
         if (delivered > 0) {
             clearDeliveryClaimTag(inventory, claim.id, delivery.item);
             if (taggedItemCount(inventory, claim.id) != 0) {
-                throw std::runtime_error(std::format("交付标记 {} 尚未从物品栏清除", claim.id));
+                throw std::runtime_error(std::format("delivery marker {} was not cleared from inventory", claim.id));
             }
             service_->markDeliveryClaimCleaned(claim.id);
             delivered_total += delivered;
@@ -1477,7 +1526,7 @@ int ExchangePlugin::claimDeliveries(endstone::Player &player, const bool announc
         }
     }
     if (announce && delivered_total > 0) {
-        player.sendMessage("§a已领取 {} 件交易物品。§r", delivered_total);
+        player.sendMessage("{}", tr(languageFor(player), Message::ClaimedItems, delivered_total));
     }
     return delivered_total;
 }
@@ -1505,19 +1554,41 @@ void ExchangePlugin::queueInventoryResync(endstone::Player &player) {
 }
 
 void ExchangePlugin::giveExchanger(endstone::Player &player) {
+    const auto language = languageFor(player);
     endstone::ItemStack stick(endstone::ItemTypeId("minecraft:stick"), 1);
     auto meta = stick.getItemMeta();
     meta->setDisplayName("exchanger");
-    meta->setLore(std::vector<std::string>{"§7右击物体：开启/关闭交易"});
+    meta->setLore(std::vector<std::string>{std::string(messageText(language, Message::ExchangerLore))});
     if (!stick.setItemMeta(meta.get())) {
-        throw std::runtime_error("无法设置 exchanger 物品名称");
+        throw UserError(tr(language, Message::ExchangerMetaFailed));
     }
     const auto leftovers = player.getInventory().addItem(stick);
     for (const auto &[slot, item] : leftovers) {
         static_cast<void>(slot);
         static_cast<void>(player.getDimension().dropItem(player.getLocation(), item));
     }
-    player.sendMessage("§a已获得 exchanger。§r");
+    player.sendMessage("{}", messageText(language, Message::ExchangerReceived));
+}
+
+void ExchangePlugin::localizeExchangers(endstone::Player &player) {
+    auto &inventory = player.getInventory();
+    const auto lore = std::vector<std::string>{
+        std::string(messageText(languageFor(player), Message::ExchangerLore))};
+    const auto update = [&lore](endstone::ItemStack &item) {
+        auto meta = item.getItemMeta();
+        meta->setLore(lore);
+        return item.setItemMeta(meta.get());
+    };
+    for (int slot = 0; slot < inventory.getSize(); ++slot) {
+        auto item = inventory.getItem(slot);
+        if (item && isExchanger(item) && update(*item)) {
+            inventory.setItem(slot, std::move(item));
+        }
+    }
+    auto offhand = inventory.getItemInOffHand();
+    if (offhand && isExchanger(offhand) && update(*offhand)) {
+        inventory.setItemInOffHand(std::move(*offhand));
+    }
 }
 
 void ExchangePlugin::refreshHolograms() {
@@ -1669,20 +1740,52 @@ void ExchangePlugin::refreshHologram(const Market &market, const OrderBook &book
     }
     hologram_ids_[market.id] = hologram->getId();
     hologram_anchors_[market.id] = current_anchor;
-    hologram->setNameTag(marketHologramText(market, book));
+    const auto fallback_name = marketHologramText(
+        market, book, Language::SimplifiedChinese, localizedItemName(market.item, Language::SimplifiedChinese));
+    const bool name_changed = hologram->getNameTag() != fallback_name;
+    if (name_changed) {
+        hologram->setNameTag(fallback_name);
+    }
     hologram->setNameTagVisible(true);
     hologram->setNameTagAlwaysVisible(true);
-    sendHologramAppearance(*hologram);
+    sendHologramAppearance(*hologram, market, book);
+    if (name_changed) {
+        static_cast<void>(getServer().getScheduler().runTaskLater(
+            *this,
+            [this, market_id = market.id] {
+                if (!ready_) {
+                    return;
+                }
+                const auto market_it = markets_.find(market_id);
+                if (market_it == markets_.end()) {
+                    return;
+                }
+                auto *current = findActorByTag(hologramTag(market_id));
+                if (current == nullptr) {
+                    return;
+                }
+                const auto book_it = hologram_books_.find(market_id);
+                const auto &current_book = book_it == hologram_books_.end() ? OrderBook{} : book_it->second;
+                sendHologramAppearance(*current, market_it->second, current_book);
+            },
+            1));
+    }
 }
 
-void ExchangePlugin::sendHologramAppearance(const endstone::Actor &hologram, endstone::Player *recipient) const {
-    const auto payload = hologramAppearancePacket(hologram.getRuntimeId());
+void ExchangePlugin::sendHologramAppearance(const endstone::Actor &hologram, const Market &market,
+                                            const OrderBook &book, endstone::Player *recipient) const {
     if (recipient != nullptr) {
+        const auto language = languageFor(*recipient);
+        const auto text = marketHologramText(market, book, language, localizedItemName(market.item, language));
+        const auto payload = hologramAppearancePacket(hologram.getRuntimeId(), text);
         recipient->sendPacket(SetActorDataPacketId, payload);
         return;
     }
     for (auto *player : getServer().getOnlinePlayers()) {
         if (player != nullptr) {
+            const auto language = languageFor(*player);
+            const auto text = marketHologramText(market, book, language, localizedItemName(market.item, language));
+            const auto payload = hologramAppearancePacket(hologram.getRuntimeId(), text);
             player->sendPacket(SetActorDataPacketId, payload);
         }
     }
@@ -1773,7 +1876,6 @@ bool ExchangePlugin::recreateHologramsNearPlayer(endstone::Player &player) {
 void ExchangePlugin::syncHologramsForPlayer(endstone::Player &player) const {
     constexpr float AppearanceRangeSquared = 160.0F * 160.0F;
     for (const auto &[market_id, market] : markets_) {
-        static_cast<void>(market);
         endstone::Actor *hologram = nullptr;
         if (const auto remembered = hologram_ids_.find(market_id); remembered != hologram_ids_.end()) {
             hologram = findActorById(remembered->second);
@@ -1785,7 +1887,9 @@ void ExchangePlugin::syncHologramsForPlayer(endstone::Player &player) const {
             hologram->getLocation().distanceSquared(player.getLocation()) > AppearanceRangeSquared) {
             continue;
         }
-        sendHologramAppearance(*hologram, &player);
+        const auto book = hologram_books_.find(market_id);
+        sendHologramAppearance(*hologram, market, book == hologram_books_.end() ? OrderBook{} : book->second,
+                               &player);
     }
 }
 
@@ -1993,6 +2097,31 @@ bool ExchangePlugin::marketTargetsChunk(const Market &market, const std::string_
     const auto location = targetLocation(market);
     return location && lower(location->getDimension().getName()) == lower(std::string(dimension_name)) &&
            blockToChunk(location->getBlockX()) == chunk_x && blockToChunk(location->getBlockZ()) == chunk_z;
+}
+
+Language ExchangePlugin::languageFor(const endstone::CommandSender &sender) const noexcept {
+    const auto *player = sender.asPlayer();
+    return player == nullptr ? Language::SimplifiedChinese : languageFromLocale(player->getLocale());
+}
+
+std::string ExchangePlugin::localizedItemName(const ItemPrototype &item, const Language language) const {
+    try {
+        endstone::ItemStack sample(endstone::ItemTypeId(item.type), 1, item.data);
+        if (!item.nbt.empty()) {
+            sample.setNbt(NbtCodec::decode(item.nbt));
+        }
+        if (const auto meta = sample.getItemMeta(); meta && meta->hasDisplayName()) {
+            return item.name;
+        }
+        const auto key = sample.getTranslationKey();
+        auto translated = getServer().getLanguage().translate(key, std::string(localeCode(language)));
+        if (!translated.empty() && translated != key) {
+            return translated;
+        }
+    } catch (const std::exception &) {
+        // The persisted fallback remains usable if a newer item type is unknown to this server.
+    }
+    return item.name;
 }
 
 std::string ExchangePlugin::formatMoney(const Cents cents) {

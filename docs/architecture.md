@@ -11,6 +11,7 @@
 | `item_identity` | Canonical type, data value and complete-NBT comparison | Inventory mutation or SQL access |
 | `interaction_gate` | Per-player duplicate right-click suppression | Gameplay or database state |
 | `trade_form` | Available-action selection, strict integer text parsing, bounded adjustments and trade-action mapping | Endstone players, inventory mutation or database access |
+| `localization` | Client-locale normalization, complete four-language message catalogs, safe formatting and player-error boundaries | Endstone events, SQL or inventory mutation |
 | `exchange_service` | Market generations, price-time matching, escrow state machines and settlement invariants | Endstone objects |
 | `database` | MySQL connection, timeouts, transactions and ordered schema upgrades | Gameplay decisions |
 | `nbt_codec` | Deterministic item NBT encoding | World storage discovery |
@@ -47,7 +48,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 
 - Periodic label reads are one asynchronous batch snapshot, not three queries per market on the server thread.
 - Every form transition closes first and opens the next page one tick later. The action page is rebuilt from the current order book, the input page contains quantity plus an optional limit price, and the review page owns the bounded adjustment buttons. After settlement, the authoritative main inventory and offhand are resent one tick later so transient escrow markers cannot leave a stale client-held item.
-- Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning, a 20-tick grace period lets persisted actors return before any replacement is created, and chunk reconciliation removes stale duplicates. For target chunks that were already loaded when a player joined, one five-tick remove/recreate sequence after spawn or chunk crossing guarantees Bedrock receives `AddActor` before the repeated appearance metadata; chunks loaded by that player keep their normal lifecycle.
+- Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box and overrides the label text for each recipient's locale. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning, a 20-tick grace period lets persisted actors return before any replacement is created, and chunk reconciliation removes stale duplicates. For target chunks that were already loaded when a player joined, one five-tick remove/recreate sequence after spawn or chunk crossing guarantees Bedrock receives `AddActor` before the repeated appearance metadata; chunks loaded by that player keep their normal lifecycle.
 - The Endstone thread only applies a completed snapshot to actors.
 - Connection, read and write operations have bounded timeouts.
 - Matching transactions lock only the submitted physical market, account and open-order rows for its shared item book.
@@ -67,6 +68,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 - Price-time priority, partial fills, crossed limit prices, cancellation, market close and self-trade exclusion.
 - Same-item cross-position matching, independent position toggles and different-NBT isolation.
 - Repeated interaction packets, duplicate forms, form close after submission, main inventory and offhand sell escrow.
+- Locale resolution, catalog completeness and all player-visible flows in `zh_CN`, `en_US`, `zh_TW` and `ja_JP`, including per-recipient hologram metadata.
 - Server termination at every delivery and sell-escrow state transition, followed by reconnect recovery.
 - Full inventory, non-stackable items, custom NBT, empty and filled item frames.
 - Database timeout/reconnect, server restart, target chunk unload/reload, player reconnect, duplicate-label cleanup, stable label position and actor removal.

@@ -647,15 +647,20 @@ void ExchangeService::cancelOrder(const Id order_id, const std::string_view play
 
 std::vector<OpenOrder> ExchangeService::openOrders(const std::string_view player_uuid) {
     const auto rows = database_.query(
-        std::format("SELECT o.id,o.market_id,m.item_name,o.side,o.price_cents,o.remaining_qty FROM exchange_orders o "
+        std::format("SELECT o.id,o.market_id,m.item_type,m.item_data,m.item_nbt,m.item_name,o.side,o.price_cents,"
+                    "o.remaining_qty FROM exchange_orders o "
                     "JOIN exchange_markets m ON m.id=o.market_id WHERE o.player_uuid={} AND o.order_type='LIMIT' "
                     "AND o.status IN ('OPEN','PARTIAL') ORDER BY o.id DESC",
                     database_.quote(player_uuid)));
     std::vector<OpenOrder> result;
     result.reserve(rows.size());
     for (const auto &row : rows) {
-        result.push_back({static_cast<Id>(cellInt64(row, 0)), static_cast<Id>(cellInt64(row, 1)), cellString(row, 2),
-                          cellString(row, 3) == "BUY" ? Side::Buy : Side::Sell, cellInt64(row, 4), cellInt(row, 5)});
+        result.push_back({static_cast<Id>(cellInt64(row, 0)),
+                          static_cast<Id>(cellInt64(row, 1)),
+                          {cellString(row, 2), cellInt(row, 3), bytesFromCell(row, 4), cellString(row, 5)},
+                          cellString(row, 6) == "BUY" ? Side::Buy : Side::Sell,
+                          cellInt64(row, 7),
+                          cellInt(row, 8)});
     }
     return result;
 }

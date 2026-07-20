@@ -50,11 +50,11 @@ endstone::ItemStack sampleItem(const ItemPrototype &prototype) {
     return sample;
 }
 
-endstone::ItemStack sellReceipt(const Id escrow_id) {
+endstone::ItemStack sellReceipt(const Id escrow_id, const Language language) {
     endstone::ItemStack receipt(endstone::ItemTypeId("minecraft:barrier"), 1);
     auto meta = receipt.getItemMeta();
-    meta->setDisplayName("§r交易暂存记录");
-    meta->setLore(std::vector<std::string>{"§7请勿移动；系统将自动回收"});
+    meta->setDisplayName(std::string(messageText(language, Message::ReceiptName)));
+    meta->setLore(std::vector<std::string>{std::string(messageText(language, Message::ReceiptLore))});
     if (!receipt.setItemMeta(meta.get())) {
         throw std::runtime_error("cannot create sell escrow receipt");
     }
@@ -205,7 +205,8 @@ int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemProt
 }
 
 TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,
-                             const int requested_quantity, const Id escrow_id) {
+                             const int requested_quantity, const Id escrow_id, const Language language,
+                             const std::string_view localized_item_name) {
     if (requested_quantity <= 0) {
         throw std::runtime_error("sell escrow quantity must be positive");
     }
@@ -235,9 +236,9 @@ TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPro
         collect(OffHandSlot, std::move(*offhand));
     }
     if (available < requested_quantity) {
-        throw std::runtime_error(std::format("背包中有 {} 件 {}。符合出售要求的有 {} 件，本次需要 {} 件。\n{}",
-                                             same_type, prototype.name, available, requested_quantity,
-                                             describeItemRequirements(prototype)));
+        const auto item_name = localized_item_name.empty() ? std::string_view(prototype.name) : localized_item_name;
+        throw UserError(tr(language, Message::InventoryInsufficient, same_type, item_name, available,
+                           requested_quantity, describeItemRequirements(prototype, language, item_name)));
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &left, const auto &right) { return left.second.getAmount() < right.second.getAmount(); });
@@ -302,16 +303,17 @@ void removeTaggedSellItems(endstone::PlayerInventory &inventory, const Id escrow
     }
 }
 
-void replaceTaggedSellItemsWithReceipts(endstone::PlayerInventory &inventory, const Id escrow_id) {
+void replaceTaggedSellItemsWithReceipts(endstone::PlayerInventory &inventory, const Id escrow_id,
+                                        const Language language) {
     for (int slot = 0; slot < inventory.getSize(); ++slot) {
         const auto item = inventory.getItem(slot);
         if (item && sellItemEscrowId(*item) == escrow_id) {
-            inventory.setItem(slot, sellReceipt(escrow_id));
+            inventory.setItem(slot, sellReceipt(escrow_id, language));
         }
     }
     const auto offhand = inventory.getItemInOffHand();
     if (offhand && sellItemEscrowId(*offhand) == escrow_id) {
-        inventory.setItemInOffHand(sellReceipt(escrow_id));
+        inventory.setItemInOffHand(sellReceipt(escrow_id, language));
     }
 }
 
