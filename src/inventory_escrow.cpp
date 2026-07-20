@@ -235,9 +235,9 @@ TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPro
         collect(OffHandSlot, std::move(*offhand));
     }
     if (available < requested_quantity) {
-        throw std::runtime_error(std::format(
-            "背包中与市场完全一致的 {} 只有 {} 件，需要 {} 件（同类型共 {} 件；名称、附魔、耐久等 NBT 必须一致）",
-            prototype.name, available, requested_quantity, same_type));
+        throw std::runtime_error(std::format("背包中有 {} 件 {}。符合出售要求的有 {} 件，本次需要 {} 件。\n{}",
+                                             same_type, prototype.name, available, requested_quantity,
+                                             describeItemRequirements(prototype)));
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &left, const auto &right) { return left.second.getAmount() < right.second.getAmount(); });

@@ -2,6 +2,7 @@
 
 #include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/inventory_escrow.hpp"
+#include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 #include "endstone_exchange/version.hpp"
@@ -873,14 +874,14 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto account_balance = service_->balance(player.getUniqueId().str());
         const auto sellable_quantity = sellableItemCount(player.getInventory(), market_it->second.item);
 
-        std::string book_text = "§a有人要买（单价 x 数量）§r\n";
+        std::string book_text = "§a有人要买§r\n";
         if (book.bids.empty()) {
             book_text += "  --\n";
         }
         for (const auto &level : book.bids) {
             book_text += std::format("  §a{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
         }
-        book_text += "§c有人在卖（单价 x 数量）§r\n";
+        book_text += "§c有人在卖§r\n";
         if (book.asks.empty()) {
             book_text += "  --\n";
         }
@@ -898,18 +899,19 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         }
         const auto price_window = makePriceSliderWindow(config_.market.price_min_cents, config_.market.price_max_cents,
                                                         config_.market.price_step_cents, reference);
-        const auto price_label = std::format(
-            "我的单价（{} 至 {}，每格 {}；立即交易时忽略）", formatUnitPrice(price_window.base_cents),
-            formatUnitPrice(price_window.priceAt(price_window.max_index)), formatUnitPrice(price_window.step_cents));
+        const auto price_label = std::format("我的单价\n范围：{} 至 {}\n每格：{}\n立即购买和立即出售不使用这个价格",
+                                             formatUnitPrice(price_window.base_cents),
+                                             formatUnitPrice(price_window.priceAt(price_window.max_index)),
+                                             formatUnitPrice(price_window.step_cents));
+        const auto item_requirements = describeItemRequirements(market_it->second.item);
 
         endstone::ModalForm form;
         form.setTitle("交易 · " + market_it->second.item.name)
             .addControl(endstone::Header("当前交易"))
             .addControl(endstone::Label(book_text))
             .addControl(endstone::Label("§6余额：§e" + formatMoney(account_balance) + "§r"))
-            .addControl(endstone::Label(std::format(
-                "§6可出售：§e{} 件§r（名称、附魔、耐久及其他属性必须与这里展示的物品完全一致）",
-                sellable_quantity)))
+            .addControl(endstone::Label(
+                std::format("§6可出售：§e{} 件§r\n§6出售要求§r\n{}", sellable_quantity, item_requirements)))
             .addControl(endstone::Divider())
             .addControl(endstone::Dropdown(
                 "交易方式", {"按我的价格购买", "按我的价格出售", "立即购买", "立即出售"}, 0))

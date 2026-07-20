@@ -244,6 +244,58 @@ void testCanonicalItemIdentity() {
                                          "Custom Emerald Block"};
     require(exchange::matchesItemIdentity(custom, "minecraft:emerald_block", 0, named),
             "an exact custom item must pass canonical inventory verification");
+
+    const exchange::ItemPrototype plain_requirements{
+        "minecraft:emerald_block", 0, exchange::NbtCodec::encode(endstone::CompoundTag{}), "Emerald Block"};
+    const auto plain_text = exchange::describeItemRequirements(plain_requirements);
+    require(
+        plain_text.find("自定义名称：无") != std::string::npos && plain_text.find("附魔：无") != std::string::npos &&
+            plain_text.find("耐久损耗：0") != std::string::npos && plain_text.find("其他属性：无") != std::string::npos,
+        "plain item requirements must explicitly state every absent special property");
+
+    endstone::CompoundTag display;
+    display.insert_or_assign("Name", endstone::StringTag("§a矿工镐"));
+    endstone::ListTag lore;
+    lore.emplace_back(endstone::StringTag("第一行"));
+    lore.emplace_back(endstone::StringTag("第二行"));
+    display.insert_or_assign("Lore", std::move(lore));
+
+    endstone::ListTag enchantments;
+    endstone::CompoundTag efficiency;
+    efficiency.insert_or_assign("id", endstone::ShortTag(15));
+    efficiency.insert_or_assign("lvl", endstone::ShortTag(5));
+    enchantments.emplace_back(std::move(efficiency));
+    endstone::CompoundTag unbreaking;
+    unbreaking.insert_or_assign("id", endstone::ShortTag(17));
+    unbreaking.insert_or_assign("lvl", endstone::ShortTag(3));
+    enchantments.emplace_back(std::move(unbreaking));
+
+    endstone::ListTag can_destroy;
+    can_destroy.emplace_back(endstone::StringTag("minecraft:stone"));
+    can_destroy.emplace_back(endstone::StringTag("minecraft:deepslate"));
+
+    endstone::CompoundTag detailed;
+    detailed.insert_or_assign("display", std::move(display));
+    detailed.insert_or_assign("ench", std::move(enchantments));
+    detailed.insert_or_assign("Damage", endstone::IntTag(12));
+    detailed.insert_or_assign("RepairCost", endstone::IntTag(7));
+    detailed.insert_or_assign("Unbreakable", endstone::ByteTag(1));
+    detailed.insert_or_assign("CanDestroy", std::move(can_destroy));
+    detailed.insert_or_assign("custom_origin", endstone::StringTag("village_reward"));
+    const exchange::ItemPrototype detailed_item{"minecraft:diamond_pickaxe", 4, exchange::NbtCodec::encode(detailed),
+                                                "矿工镐"};
+    const auto details = exchange::describeItemRequirements(detailed_item);
+    require(
+        details.find("数据值：4") != std::string::npos && details.find("自定义名称：§a矿工镐§r") != std::string::npos &&
+            details.find("物品说明：第一行§r；第二行§r") != std::string::npos &&
+            details.find("附魔：效率 5、耐久 3") != std::string::npos &&
+            details.find("耐久损耗：12") != std::string::npos && details.find("铁砧修复代价：7") != std::string::npos &&
+            details.find("不会损坏：是") != std::string::npos &&
+            details.find("可破坏方块：minecraft:stone、minecraft:deepslate") != std::string::npos &&
+            details.find("custom_origin：village_reward") != std::string::npos,
+        "special item requirements must name enchantments and every other matching field");
+    require(details.find("NBT") == std::string::npos && details.find("（") == std::string::npos,
+            "player-facing requirements must avoid technical or parenthetical shorthand");
 }
 
 void appendLittle16(std::vector<std::uint8_t> &bytes, const std::uint16_t value) {
