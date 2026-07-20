@@ -5,7 +5,7 @@
 #include "endstone_exchange/exchange_service.hpp"
 #include "endstone_exchange/interaction_gate.hpp"
 #include "endstone_exchange/market_display.hpp"
-#include "endstone_exchange/price_window.hpp"
+#include "endstone_exchange/trade_form.hpp"
 
 #include <endstone/endstone.hpp>
 
@@ -79,8 +79,12 @@ class ExchangePlugin : public endstone::Plugin {
 
     void queueTradeForm(endstone::Player &player, Id market_id);
     void openTradeForm(endstone::Player &player, Id market_id);
-    void submitTradeForm(endstone::Player &player, Id market_id, const PriceSliderWindow &price_window,
-                         std::string_view response);
+    void queueTradeInputForm(endstone::Player &player, Id market_id, TradeDraft draft);
+    void openTradeInputForm(endstone::Player &player, Id market_id, TradeDraft draft);
+    void queueTradeReviewForm(endstone::Player &player, Id market_id, TradeDraft draft);
+    void openTradeReviewForm(endstone::Player &player, Id market_id, TradeDraft draft);
+    void queueTradeSubmission(endstone::Player &player, Id market_id, TradeDraft draft);
+    void submitTradeDraft(endstone::Player &player, Id market_id, const TradeDraft &draft);
     void openOrdersForm(endstone::Player &player);
     [[nodiscard]] ExecutionResult submitSellEscrow(endstone::Player &player, const OrderRequest &request);
     void reconcileInternalEscrowMarkers(endstone::Player &player);
@@ -108,7 +112,6 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] bool marketTargetsChunk(const Market &market, std::string_view dimension_name, int chunk_x,
                                           int chunk_z) const;
 
-    [[nodiscard]] static std::vector<double> numericFormValues(std::string_view response);
     [[nodiscard]] static std::string formatMoney(Cents cents);
     [[nodiscard]] static std::string targetTag(Id market_id);
     [[nodiscard]] static std::string hologramTag(Id market_id);

@@ -10,7 +10,7 @@
 | `market_display` | Stable label anchors, chunk coordinate mapping and simple player-facing trade text | Endstone actors, SQL or scheduling |
 | `item_identity` | Canonical type, data value and complete-NBT comparison | Inventory mutation or SQL access |
 | `interaction_gate` | Per-player duplicate right-click suppression | Gameplay or database state |
-| `price_window` | Exact integer-cent mapping for Bedrock float sliders | Form rendering or database access |
+| `trade_form` | Available-action selection, strict integer text parsing, bounded adjustments and trade-action mapping | Endstone players, inventory mutation or database access |
 | `exchange_service` | Market generations, price-time matching, escrow state machines and settlement invariants | Endstone objects |
 | `database` | MySQL connection, timeouts, transactions and ordered schema upgrades | Gameplay decisions |
 | `nbt_codec` | Deterministic item NBT encoding | World storage discovery |
@@ -27,7 +27,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 - `exchange_delivery_claims` reserves a delivery before a claim marker enters the inventory. Reconnect either applies the tagged quantity or releases the reservation.
 - `exchange_sell_escrows` moves whole matching stacks through `PREPARED`, `TAGGED`, `ORDERED` and `CLEANED`. Temporary barrier receipts make an interrupted inventory removal distinguishable from an order that was never funded.
 - `exchange_balance_ledger` is append-only. For every player, `SUM(delta_cents)` must equal `exchange_accounts.balance_cents`.
-- Money is signed 64-bit integer cents. Bedrock sliders submit only small integer indexes; the server maps them back to exact cents.
+- Money is signed 64-bit integer cents. Player-entered prices are strict whole-`u` strings; the server validates the configured range and step before mapping them to exact cents.
 
 ## Schema upgrades
 
@@ -46,7 +46,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 ## Runtime performance
 
 - Periodic label reads are one asynchronous batch snapshot, not three queries per market on the server thread.
-- A form submission closes first and executes one tick later. After settlement, the authoritative main inventory and offhand are resent one tick later so transient escrow markers cannot leave a stale client-held item.
+- Every form transition closes first and opens the next page one tick later. The action page is rebuilt from the current order book, the input page contains quantity plus an optional limit price, and the review page owns the bounded adjustment buttons. After settlement, the authoritative main inventory and offhand are resent one tick later so transient escrow markers cannot leave a stale client-held item.
 - Label carriers remain normal protected actors on the server, while a small public `Player::sendPacket` metadata update makes them `0.01` scale with a zero client collision box. Block labels rest on the block instead of being teleported every refresh. The loaded-chunk index prevents off-screen spawning, a 20-tick grace period lets persisted actors return before any replacement is created, and chunk reconciliation removes stale duplicates. For target chunks that were already loaded when a player joined, one five-tick remove/recreate sequence after spawn or chunk crossing guarantees Bedrock receives `AddActor` before the repeated appearance metadata; chunks loaded by that player keep their normal lifecycle.
 - The Endstone thread only applies a completed snapshot to actors.
 - Connection, read and write operations have bounded timeouts.

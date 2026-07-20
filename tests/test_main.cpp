@@ -6,8 +6,8 @@
 #include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
-#include "endstone_exchange/price_window.hpp"
 #include "endstone_exchange/structure_reader.hpp"
+#include "endstone_exchange/trade_form.hpp"
 
 #include <algorithm>
 #include <barrier>
@@ -86,41 +86,101 @@ void testConfig() {
     std::filesystem::remove(path, ignored);
 }
 
-void testPriceSliderWindow() {
-    const auto whole_units = exchange::makePriceSliderWindow(100, 500'000, 100, 1000);
-    require(whole_units.max_index == 4'999 && whole_units.default_index == 9 &&
-                whole_units.priceAt(0) == 100 && whole_units.priceAt(whole_units.max_index) == 500'000,
-            "default slider must cover every whole-u price from 1 through 5000");
-    require(whole_units.priceFromDisplayedUnits(1) == 100 &&
-                whole_units.priceFromDisplayedUnits(5000) == 500'000,
-            "displayed whole-u slider values must map directly to cents");
+void testTradeFormFlow() {
+    using exchange::TradeAction;
 
-    const auto near_max = exchange::makePriceSliderWindow(1, 100'000'000, 1, 100'000'000);
-    require(near_max.max_index == 10'000 && near_max.default_index == 10'000,
-            "large prices must use a float-safe integer slider window");
-    require(near_max.priceAt(near_max.default_index) == 100'000'000,
-            "price slider must preserve exact cents at the configured maximum");
+    const auto empty = exchange::availableTradeActions(false, false);
+    require(empty == std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell},
+            "empty order books must hide both direct trade actions");
 
-    const auto stepped = exchange::makePriceSliderWindow(5, 10'000, 3, 107);
-    require((stepped.priceAt(stepped.default_index) - 5) % 3 == 0,
-            "price slider values must stay on the configured integer-cent grid");
-    bool invalid_rejected = false;
+    const auto bids_only = exchange::availableTradeActions(true, false);
+    require(bids_only ==
+                std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell, TradeAction::MarketSell},
+            "a buy order must expose direct sell only");
+
+    const auto asks_only = exchange::availableTradeActions(false, true);
+    require(asks_only ==
+                std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell, TradeAction::MarketBuy},
+            "a sell order must expose direct buy only");
+
+    const auto both = exchange::availableTradeActions(true, true);
+    require(both == std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell,
+                                             TradeAction::MarketBuy, TradeAction::MarketSell},
+            "both sides of the book must expose both direct trade actions");
+    require(exchange::tradeActionUsesPrice(TradeAction::LimitBuy) &&
+                exchange::tradeActionUsesPrice(TradeAction::LimitSell) &&
+                !exchange::tradeActionUsesPrice(TradeAction::MarketBuy) &&
+                !exchange::tradeActionUsesPrice(TradeAction::MarketSell),
+            "direct trades must never have a price input");
+    require(exchange::tradeActionSide(TradeAction::LimitBuy) == exchange::Side::Buy &&
+                exchange::tradeActionSide(TradeAction::MarketBuy) == exchange::Side::Buy &&
+                exchange::tradeActionSide(TradeAction::LimitSell) == exchange::Side::Sell &&
+                exchange::tradeActionSide(TradeAction::MarketSell) == exchange::Side::Sell,
+            "trade action side mapping");
+    require(exchange::tradeActionOrderType(TradeAction::LimitBuy) == exchange::OrderType::Limit &&
+                exchange::tradeActionOrderType(TradeAction::MarketSell) == exchange::OrderType::Market,
+            "trade action order type mapping");
+    require(exchange::defaultTradePrice(100, 500'000, 100, 1'049) == 1'000 &&
+                exchange::defaultTradePrice(100, 500'000, 100, 1'050) == 1'100 &&
+                exchange::defaultTradePrice(100, 500'000, 100, 900'000) == 500'000,
+            "default input price must snap to the configured whole-u range");
+
+    const auto limit_values = exchange::textFormValues(R"(["640","5000"])");
+    require(limit_values == std::vector<std::string>{"640", "5000"},
+            "limit form must accept quantity and whole-u price text");
+    const auto direct_values = exchange::textFormValues(R"(["7"])");
+    require(direct_values == std::vector<std::string>{"7"},
+            "direct form response must contain quantity only");
+    require(exchange::parseTradeQuantity(" 640 ", 640) == 640, "quantity input trims surrounding whitespace");
+    require(exchange::parseTradePrice("5000", 100, 500'000, 100) == 500'000,
+            "whole-u input maps to exact cents");
+
+    bool rejected = false;
     try {
-        static_cast<void>(stepped.priceAt(stepped.max_index + 1));
+        static_cast<void>(exchange::textFormValues(R"([1])"));
     } catch (const std::exception &) {
-        invalid_rejected = true;
+        rejected = true;
     }
-    require(invalid_rejected, "price slider must reject out-of-window client values");
-    invalid_rejected = false;
-    std::string invalid_price_message;
+    require(rejected, "numeric JSON must not bypass text input validation");
+    for (const auto malformed : {R"(["1",)", R"(["1"] trailing)"}) {
+        rejected = false;
+        try {
+            static_cast<void>(exchange::textFormValues(malformed));
+        } catch (const std::exception &) {
+            rejected = true;
+        }
+        require(rejected, "malformed text input JSON must be rejected");
+    }
+    rejected = false;
     try {
-        static_cast<void>(whole_units.priceFromDisplayedUnits(5000.5));
-    } catch (const std::exception &error) {
-        invalid_rejected = true;
-        invalid_price_message = error.what();
+        static_cast<void>(exchange::parseTradeQuantity("641", 640));
+    } catch (const std::exception &) {
+        rejected = true;
     }
-    require(invalid_rejected && invalid_price_message == "价格超出允许范围，或不是整数",
-            "whole-u slider must reject forged prices with a player-facing Chinese error");
+    require(rejected, "quantity input must reject values above 640");
+    rejected = false;
+    try {
+        static_cast<void>(exchange::parseTradePrice("10.5", 100, 500'000, 100));
+    } catch (const std::exception &) {
+        rejected = true;
+    }
+    require(rejected, "price input must reject decimal values");
+    rejected = false;
+    try {
+        static_cast<void>(exchange::parseTradePrice("5001", 100, 500'000, 100));
+    } catch (const std::exception &) {
+        rejected = true;
+    }
+    require(rejected, "price input must reject values above 5000u");
+
+    require(exchange::adjustTradeQuantity(1, -100, 640) == 1 &&
+                exchange::adjustTradeQuantity(630, 100, 640) == 640 &&
+                exchange::adjustTradeQuantity(10, 1, 640) == 11,
+            "quantity adjustment buttons must clamp to 1 through 640");
+    require(exchange::adjustTradePrice(100, -100, 100, 500'000) == 100 &&
+                exchange::adjustTradePrice(499'000, 100, 100, 500'000) == 500'000 &&
+                exchange::adjustTradePrice(1'000, 1, 100, 500'000) == 1'100,
+            "price adjustment buttons must clamp to 1u through 5000u");
 }
 
 void testInteractionGate() {
@@ -976,7 +1036,7 @@ int main() {
     try {
         testNbtCodec();
         testConfig();
-        testPriceSliderWindow();
+        testTradeFormFlow();
         testInteractionGate();
         testHologramAppearancePacket();
         testMarketDisplay();

@@ -5,6 +5,7 @@
 #include "endstone_exchange/item_identity.hpp"
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
+#include "endstone_exchange/trade_form.hpp"
 #include "endstone_exchange/version.hpp"
 
 #include <algorithm>
@@ -855,6 +856,57 @@ void ExchangePlugin::queueTradeForm(endstone::Player &player, const Id market_id
         1));
 }
 
+void ExchangePlugin::queueTradeInputForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name, market_id, draft] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                openTradeInputForm(*current, market_id, draft);
+            }
+        },
+        1));
+}
+
+void ExchangePlugin::queueTradeReviewForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name, market_id, draft] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                openTradeReviewForm(*current, market_id, draft);
+            }
+        },
+        1));
+}
+
+void ExchangePlugin::queueTradeSubmission(endstone::Player &player, const Id market_id, const TradeDraft draft) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name, market_id, draft] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                submitTradeDraft(*current, market_id, draft);
+            }
+        },
+        1));
+}
+
 void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id) {
     const auto player_uuid = player.getUniqueId().str();
     if (!open_trade_forms_.insert(player_uuid).second) {
@@ -897,53 +949,45 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         } else if (!book.asks.empty()) {
             reference = book.asks.front().price_cents;
         }
-        const auto price_window = makePriceSliderWindow(config_.market.price_min_cents, config_.market.price_max_cents,
-                                                        config_.market.price_step_cents, reference);
-        const auto price_label = std::format("我的单价\n范围：{} 至 {}\n每格：{}\n立即购买和立即出售不使用这个价格",
-                                             formatUnitPrice(price_window.base_cents),
-                                             formatUnitPrice(price_window.priceAt(price_window.max_index)),
-                                             formatUnitPrice(price_window.step_cents));
+        const auto default_price = defaultTradePrice(config_.market.price_min_cents, config_.market.price_max_cents,
+                                                     config_.market.price_step_cents, reference);
         const auto item_requirements = describeItemRequirements(market_it->second.item);
 
-        endstone::ModalForm form;
+        endstone::ActionForm form;
         form.setTitle("交易 · " + market_it->second.item.name)
-            .addControl(endstone::Header("当前交易"))
-            .addControl(endstone::Label(book_text))
-            .addControl(endstone::Label("§6余额：§e" + formatMoney(account_balance) + "§r"))
-            .addControl(endstone::Label(
-                std::format("§6可出售：§e{} 件§r\n§6出售要求§r\n{}", sellable_quantity, item_requirements)))
-            .addControl(endstone::Divider())
-            .addControl(endstone::Dropdown(
-                "交易方式", {"按我的价格购买", "按我的价格出售", "立即购买", "立即出售"}, 0))
-            .addControl(
-                endstone::Slider("数量", 1.0F, static_cast<float>(config_.market.max_order_quantity), 1.0F, 1.0F))
-            .addControl(endstone::Slider(
-                price_label, static_cast<float>(price_window.base_cents) / 100.0F,
-                static_cast<float>(price_window.priceAt(price_window.max_index)) / 100.0F,
-                static_cast<float>(price_window.step_cents) / 100.0F,
-                static_cast<float>(price_window.priceAt(price_window.default_index)) / 100.0F))
-            .setSubmitButton("确认")
-            .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); })
-            .setOnSubmit([this, market_id, price_window, player_uuid](endstone::Player *form_player,
-                                                                     std::string response) {
+            .addHeader("当前交易")
+            .addLabel(book_text)
+            .addLabel("§6余额：§e" + formatMoney(account_balance) + "§r")
+            .addLabel(std::format("§6可出售：§e{} 件§r\n§6出售要求§r\n{}", sellable_quantity, item_requirements))
+            .addDivider()
+            .addHeader("选择交易方式");
+
+        const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
+        for (const auto action : actions) {
+            auto button_text = std::string(tradeActionLabel(action));
+            if (action == TradeAction::MarketBuy) {
+                button_text += "\n按当前出售价格购买";
+            } else if (action == TradeAction::MarketSell) {
+                button_text += "\n按当前收购价格出售";
+            }
+            form.addButton(button_text, std::nullopt,
+                           [this, market_id, action, default_price, player_uuid](endstone::Player *form_player) {
                 open_trade_forms_.erase(player_uuid);
-                if (form_player != nullptr && ready_) {
-                    const auto player_name = form_player->getName();
-                    form_player->closeForm();
-                    static_cast<void>(getServer().getScheduler().runTaskLater(
-                        *this,
-                        [this, market_id, price_window, player_uuid, player_name, response = std::move(response)] {
-                            if (!ready_) {
-                                return;
-                            }
-                            auto *current = getServer().getPlayer(player_name);
-                            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
-                                submitTradeForm(*current, market_id, price_window, response);
-                            }
-                        },
-                        1));
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
                 }
+                form_player->closeForm();
+                const TradeDraft draft{action, 1, tradeActionUsesPrice(action) ? default_price : 0};
+                queueTradeInputForm(*form_player, market_id, draft);
             });
+        }
+        if (book.asks.empty()) {
+            form.addLabel("当前没有人在出售，暂不显示直接购买。");
+        }
+        if (book.bids.empty()) {
+            form.addLabel("当前没有人在收购，暂不显示直接出售。");
+        }
+        form.setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {
         open_trade_forms_.erase(player_uuid);
@@ -952,40 +996,226 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
     }
 }
 
-void ExchangePlugin::submitTradeForm(endstone::Player &player, const Id market_id,
-                                     const PriceSliderWindow &price_window, const std::string_view response) {
+void ExchangePlugin::openTradeInputForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
+    const auto player_uuid = player.getUniqueId().str();
+    if (!open_trade_forms_.insert(player_uuid).second) {
+        return;
+    }
     try {
-        const auto values = numericFormValues(response);
-        if (values.size() < 3) {
-            throw std::runtime_error("客户端返回了无效表单数据");
+        const auto market_it = markets_.find(market_id);
+        if (market_it == markets_.end()) {
+            open_trade_forms_.erase(player_uuid);
+            player.sendErrorMessage("这个交易点已经关闭。");
+            return;
         }
-        const auto rounded_action = std::round(values[0]);
-        if (values[0] != rounded_action || rounded_action < 0.0 || rounded_action > 3.0) {
-            throw std::runtime_error("交易方式无效");
+        const auto book = service_->orderBook(market_id, 1);
+        const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
+        if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
+            open_trade_forms_.erase(player_uuid);
+            player.sendErrorMessage("对应的订单已经没有了，请重新选择交易方式。");
+            queueTradeForm(player, market_id);
+            return;
         }
-        const auto action = static_cast<int>(rounded_action);
-        const auto rounded_quantity = std::round(values[1]);
-        if (values[1] != rounded_quantity || rounded_quantity < 1.0 ||
-            rounded_quantity > static_cast<double>(config_.market.max_order_quantity)) {
+
+        endstone::ModalForm form;
+        form.setTitle(std::string(tradeActionLabel(draft.action)) + " · " + market_it->second.item.name)
+            .addControl(endstone::TextInput(
+                std::format("数量（1 至 {}）", config_.market.max_order_quantity), "请输入整数",
+                std::to_string(draft.quantity)));
+        if (tradeActionUsesPrice(draft.action)) {
+            form.addControl(endstone::TextInput(
+                std::format("每件价格（{} 至 {}，只填整数）", formatUnitPrice(config_.market.price_min_cents),
+                            formatUnitPrice(config_.market.price_max_cents)),
+                "例如 10", std::to_string(draft.price_cents / 100)));
+        }
+        form.setSubmitButton("继续")
+            .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); })
+            .setOnSubmit([this, market_id, draft, player_uuid](endstone::Player *form_player, std::string response) {
+                open_trade_forms_.erase(player_uuid);
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
+                }
+                form_player->closeForm();
+                try {
+                    const auto values = textFormValues(response);
+                    const auto expected_values = tradeActionUsesPrice(draft.action) ? 2U : 1U;
+                    if (values.size() != expected_values) {
+                        throw std::runtime_error("客户端返回了无效表单数据");
+                    }
+                    auto updated = draft;
+                    updated.quantity = parseTradeQuantity(values[0], config_.market.max_order_quantity);
+                    if (tradeActionUsesPrice(draft.action)) {
+                        updated.price_cents =
+                            parseTradePrice(values[1], config_.market.price_min_cents,
+                                            config_.market.price_max_cents, config_.market.price_step_cents);
+                    }
+                    queueTradeReviewForm(*form_player, market_id, updated);
+                } catch (const std::exception &error) {
+                    form_player->sendErrorMessage("填写有误：{}。", error.what());
+                    queueTradeInputForm(*form_player, market_id, draft);
+                }
+            });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_trade_forms_.erase(player_uuid);
+        player.sendErrorMessage("打开交易填写界面失败：{}", error.what());
+        getLogger().warning("Open trade input form failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id market_id, const TradeDraft draft) {
+    const auto player_uuid = player.getUniqueId().str();
+    if (!open_trade_forms_.insert(player_uuid).second) {
+        return;
+    }
+    try {
+        const auto market_it = markets_.find(market_id);
+        if (market_it == markets_.end()) {
+            open_trade_forms_.erase(player_uuid);
+            player.sendErrorMessage("这个交易点已经关闭。");
+            return;
+        }
+        const auto book = service_->orderBook(market_id, 1);
+        const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
+        if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
+            open_trade_forms_.erase(player_uuid);
+            player.sendErrorMessage("对应的订单已经没有了，请重新选择交易方式。");
+            queueTradeForm(player, market_id);
+            return;
+        }
+
+        endstone::ActionForm form;
+        form.setTitle("确认交易 · " + market_it->second.item.name)
+            .addHeader(std::string(tradeActionLabel(draft.action)))
+            .addLabel(std::format("数量：{} 件", draft.quantity));
+        if (tradeActionUsesPrice(draft.action)) {
+            form.addLabel("每件价格：" + formatUnitPrice(draft.price_cents));
+        } else if (draft.action == TradeAction::MarketBuy) {
+            form.addLabel("将从当前最低出售价格开始购买，直到数量完成或没有可买物品。");
+        } else {
+            form.addLabel("将从当前最高收购价格开始出售，直到数量完成或没有人继续收购。");
+        }
+
+        auto review_callback = [this, market_id, player_uuid](const TradeDraft next) {
+            return [this, market_id, player_uuid, next](endstone::Player *form_player) {
+                open_trade_forms_.erase(player_uuid);
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
+                }
+                form_player->closeForm();
+                queueTradeReviewForm(*form_player, market_id, next);
+            };
+        };
+
+        form.addDivider().addHeader(
+            std::format("调整数量（1 至 {}）", config_.market.max_order_quantity));
+        for (const int delta : {-100, -10, -1}) {
+            auto next = draft;
+            next.quantity = adjustTradeQuantity(draft.quantity, delta, config_.market.max_order_quantity);
+            form.addButton(std::format("{}", delta), std::nullopt, review_callback(next));
+        }
+        form.addButton(std::format("填写数量（当前 {}）", draft.quantity), std::nullopt,
+                       [this, market_id, draft, player_uuid](endstone::Player *form_player) {
+                           open_trade_forms_.erase(player_uuid);
+                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                               return;
+                           }
+                           form_player->closeForm();
+                           queueTradeInputForm(*form_player, market_id, draft);
+                       });
+        for (const int delta : {1, 10, 100}) {
+            auto next = draft;
+            next.quantity = adjustTradeQuantity(draft.quantity, delta, config_.market.max_order_quantity);
+            form.addButton(std::format("+{}", delta), std::nullopt, review_callback(next));
+        }
+
+        if (tradeActionUsesPrice(draft.action)) {
+            form.addDivider().addHeader(std::format("调整每件价格（{} 至 {}）",
+                                                    formatUnitPrice(config_.market.price_min_cents),
+                                                    formatUnitPrice(config_.market.price_max_cents)));
+            for (const int delta : {-100, -10, -1}) {
+                auto next = draft;
+                next.price_cents = adjustTradePrice(draft.price_cents, delta, config_.market.price_min_cents,
+                                                    config_.market.price_max_cents);
+                form.addButton(std::format("{}u", delta), std::nullopt, review_callback(next));
+            }
+            form.addButton(std::format("填写价格（当前 {}）", formatUnitPrice(draft.price_cents)), std::nullopt,
+                           [this, market_id, draft, player_uuid](endstone::Player *form_player) {
+                               open_trade_forms_.erase(player_uuid);
+                               if (form_player == nullptr || !ready_ ||
+                                   form_player->getUniqueId().str() != player_uuid) {
+                                   return;
+                               }
+                               form_player->closeForm();
+                               queueTradeInputForm(*form_player, market_id, draft);
+                           });
+            for (const int delta : {1, 10, 100}) {
+                auto next = draft;
+                next.price_cents = adjustTradePrice(draft.price_cents, delta, config_.market.price_min_cents,
+                                                    config_.market.price_max_cents);
+                form.addButton(std::format("+{}u", delta), std::nullopt, review_callback(next));
+            }
+        }
+
+        form.addDivider()
+            .addButton("§a确认交易§r", std::nullopt,
+                       [this, market_id, draft, player_uuid](endstone::Player *form_player) {
+                           open_trade_forms_.erase(player_uuid);
+                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                               return;
+                           }
+                           form_player->closeForm();
+                           queueTradeSubmission(*form_player, market_id, draft);
+                       })
+            .addButton("返回选择交易方式", std::nullopt,
+                       [this, market_id, player_uuid](endstone::Player *form_player) {
+                           open_trade_forms_.erase(player_uuid);
+                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                               return;
+                           }
+                           form_player->closeForm();
+                           queueTradeForm(*form_player, market_id);
+                       })
+            .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_trade_forms_.erase(player_uuid);
+        player.sendErrorMessage("打开交易确认界面失败：{}", error.what());
+        getLogger().warning("Open trade review form failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::submitTradeDraft(endstone::Player &player, const Id market_id, const TradeDraft &draft) {
+    try {
+        if (draft.quantity < 1 || draft.quantity > config_.market.max_order_quantity) {
             throw std::runtime_error("交易数量超出允许范围");
         }
-        const auto quantity = static_cast<int>(rounded_quantity);
-        Cents price_cents = 0;
-        if (action < 2) {
-            price_cents = price_window.priceFromDisplayedUnits(values[2]);
+        if (tradeActionUsesPrice(draft.action) &&
+            (draft.price_cents < config_.market.price_min_cents ||
+             draft.price_cents > config_.market.price_max_cents ||
+             (draft.price_cents - config_.market.price_min_cents) % config_.market.price_step_cents != 0 ||
+             draft.price_cents % 100 != 0)) {
+            throw std::runtime_error("交易价格超出允许范围，或不是整数");
         }
         const auto market_it = markets_.find(market_id);
         if (market_it == markets_.end()) {
             throw std::runtime_error("交易点已经关闭");
         }
+        if (!tradeActionUsesPrice(draft.action)) {
+            const auto book = service_->orderBook(market_id, 1);
+            const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
+            if (std::find(actions.begin(), actions.end(), draft.action) == actions.end()) {
+                throw std::runtime_error("对应的订单已经成交或取消，请重新打开交易界面");
+            }
+        }
         OrderRequest request;
         request.market_id = market_id;
         request.player_uuid = player.getUniqueId().str();
         request.player_name = player.getName();
-        request.side = (action == 0 || action == 2) ? Side::Buy : Side::Sell;
-        request.type = action < 2 ? OrderType::Limit : OrderType::Market;
-        request.price_cents = price_cents;
-        request.quantity = quantity;
+        request.side = tradeActionSide(draft.action);
+        request.type = tradeActionOrderType(draft.action);
+        request.price_cents = tradeActionUsesPrice(draft.action) ? draft.price_cents : 0;
+        request.quantity = draft.quantity;
         const auto result =
             request.side == Side::Sell ? submitSellEscrow(player, request) : service_->placeOrder(request);
         int delivered_items = 0;
@@ -1763,47 +1993,6 @@ bool ExchangePlugin::marketTargetsChunk(const Market &market, const std::string_
     const auto location = targetLocation(market);
     return location && lower(location->getDimension().getName()) == lower(std::string(dimension_name)) &&
            blockToChunk(location->getBlockX()) == chunk_x && blockToChunk(location->getBlockZ()) == chunk_z;
-}
-
-std::vector<double> ExchangePlugin::numericFormValues(const std::string_view response) {
-    std::vector<double> result;
-    bool in_string = false;
-    bool escaped = false;
-    for (std::size_t index = 0; index < response.size();) {
-        const char c = response[index];
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            ++index;
-            continue;
-        }
-        if (c == '"') {
-            in_string = true;
-            ++index;
-            continue;
-        }
-        const bool number_start = std::isdigit(static_cast<unsigned char>(c)) ||
-                                  ((c == '-' || c == '+') && index + 1 < response.size() &&
-                                   std::isdigit(static_cast<unsigned char>(response[index + 1])));
-        if (!number_start) {
-            ++index;
-            continue;
-        }
-        const std::string remainder(response.substr(index));
-        char *end = nullptr;
-        const double value = std::strtod(remainder.c_str(), &end);
-        if (end == remainder.c_str() || !std::isfinite(value)) {
-            throw std::runtime_error("invalid numeric form value");
-        }
-        result.push_back(value);
-        index += static_cast<std::size_t>(end - remainder.c_str());
-    }
-    return result;
 }
 
 std::string ExchangePlugin::formatMoney(const Cents cents) {
