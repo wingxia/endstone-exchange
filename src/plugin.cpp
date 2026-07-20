@@ -946,21 +946,6 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
         const auto account_balance = service_->balance(player.getUniqueId().str());
         const auto sellable_quantity = sellableItemCount(player.getInventory(), market_it->second.item);
 
-        std::string book_text(messageText(language, Message::BookWanted));
-        if (book.bids.empty()) {
-            book_text += "  --\n";
-        }
-        for (const auto &level : book.bids) {
-            book_text += std::format("  §a{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
-        }
-        book_text += messageText(language, Message::BookForSale);
-        if (book.asks.empty()) {
-            book_text += "  --\n";
-        }
-        for (const auto &level : book.asks) {
-            book_text += std::format("  §c{} x {}§r\n", formatUnitPrice(level.price_cents), level.quantity);
-        }
-
         Cents reference = book.last_price_cents.value_or(1000);
         if (!book.bids.empty() && !book.asks.empty()) {
             reference = std::midpoint(book.bids.front().price_cents, book.asks.front().price_cents);
@@ -976,22 +961,12 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
 
         endstone::ActionForm form;
         form.setTitle(tr(language, Message::TradeTitle, item_name))
-            .addHeader(std::string(messageText(language, Message::CurrentTrade)))
-            .addLabel(book_text)
-            .addLabel(tr(language, Message::BalanceLabel, formatMoney(account_balance)))
-            .addLabel(tr(language, Message::SellableRequirements, sellable_quantity, item_requirements))
-            .addDivider()
-            .addHeader(std::string(messageText(language, Message::ChooseTradeAction)));
+            .setContent(tradeOverviewText(book, formatCurrency(account_balance), sellable_quantity,
+                                          item_requirements, language));
 
         const auto actions = availableTradeActions(!book.bids.empty(), !book.asks.empty());
         for (const auto action : actions) {
-            auto button_text = std::string(tradeActionLabel(action, language));
-            if (action == TradeAction::MarketBuy) {
-                button_text += messageText(language, Message::DirectBuySubtitle);
-            } else if (action == TradeAction::MarketSell) {
-                button_text += messageText(language, Message::DirectSellSubtitle);
-            }
-            form.addButton(button_text, std::nullopt,
+            form.addButton(std::string(tradeActionLabel(action, language)), std::nullopt,
                            [this, market_id, action, default_price, player_uuid](endstone::Player *form_player) {
                 open_trade_forms_.erase(player_uuid);
                 if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
@@ -1001,12 +976,6 @@ void ExchangePlugin::openTradeForm(endstone::Player &player, const Id market_id)
                 const TradeDraft draft{action, 1, tradeActionUsesPrice(action) ? default_price : 0};
                 queueTradeInputForm(*form_player, market_id, draft);
             });
-        }
-        if (book.asks.empty()) {
-            form.addLabel(std::string(messageText(language, Message::NoDirectBuy)));
-        }
-        if (book.bids.empty()) {
-            form.addLabel(std::string(messageText(language, Message::NoDirectSell)));
         }
         form.setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
         player.sendForm(std::move(form));
@@ -1115,98 +1084,24 @@ void ExchangePlugin::openTradeReviewForm(endstone::Player &player, const Id mark
             return;
         }
 
-        endstone::ActionForm form;
+        endstone::MessageForm form;
         const auto item_name = localizedItemName(market_it->second.item, language);
         form.setTitle(tr(language, Message::ConfirmTitle, item_name))
-            .addHeader(std::string(tradeActionLabel(draft.action, language)))
-            .addLabel(tr(language, Message::QuantityValue, draft.quantity));
-        if (tradeActionUsesPrice(draft.action)) {
-            form.addLabel(tr(language, Message::UnitPriceValue, formatUnitPrice(draft.price_cents)));
-        } else if (draft.action == TradeAction::MarketBuy) {
-            form.addLabel(std::string(messageText(language, Message::MarketBuyExplanation)));
-        } else {
-            form.addLabel(std::string(messageText(language, Message::MarketSellExplanation)));
-        }
-
-        auto review_callback = [this, market_id, player_uuid](const TradeDraft next) {
-            return [this, market_id, player_uuid, next](endstone::Player *form_player) {
+            .setContent(tradeReviewText(draft, language))
+            .setButton1(std::string(messageText(language, Message::ConfirmButton)))
+            .setButton2(std::string(messageText(language, Message::EditTradeButton)))
+            .setOnSubmit([this, market_id, draft, player_uuid](endstone::Player *form_player, const int selection) {
                 open_trade_forms_.erase(player_uuid);
                 if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
                     return;
                 }
                 form_player->closeForm();
-                queueTradeReviewForm(*form_player, market_id, next);
-            };
-        };
-
-        form.addDivider().addHeader(tr(language, Message::AdjustQuantity, config_.market.max_order_quantity));
-        for (const int delta : {-100, -10, -1}) {
-            auto next = draft;
-            next.quantity = adjustTradeQuantity(draft.quantity, delta, config_.market.max_order_quantity);
-            form.addButton(std::format("{}", delta), std::nullopt, review_callback(next));
-        }
-        form.addButton(tr(language, Message::ReenterQuantity, draft.quantity), std::nullopt,
-                       [this, market_id, draft, player_uuid](endstone::Player *form_player) {
-                           open_trade_forms_.erase(player_uuid);
-                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
-                               return;
-                           }
-                           form_player->closeForm();
-                           queueTradeInputForm(*form_player, market_id, draft);
-                       });
-        for (const int delta : {1, 10, 100}) {
-            auto next = draft;
-            next.quantity = adjustTradeQuantity(draft.quantity, delta, config_.market.max_order_quantity);
-            form.addButton(std::format("+{}", delta), std::nullopt, review_callback(next));
-        }
-
-        if (tradeActionUsesPrice(draft.action)) {
-            form.addDivider().addHeader(tr(language, Message::AdjustPrice,
-                                           formatUnitPrice(config_.market.price_min_cents),
-                                           formatUnitPrice(config_.market.price_max_cents)));
-            for (const int delta : {-100, -10, -1}) {
-                auto next = draft;
-                next.price_cents = adjustTradePrice(draft.price_cents, delta, config_.market.price_min_cents,
-                                                    config_.market.price_max_cents);
-                form.addButton(std::format("{}u", delta), std::nullopt, review_callback(next));
-            }
-            form.addButton(tr(language, Message::ReenterPrice, formatUnitPrice(draft.price_cents)), std::nullopt,
-                           [this, market_id, draft, player_uuid](endstone::Player *form_player) {
-                               open_trade_forms_.erase(player_uuid);
-                               if (form_player == nullptr || !ready_ ||
-                                   form_player->getUniqueId().str() != player_uuid) {
-                                   return;
-                               }
-                               form_player->closeForm();
-                               queueTradeInputForm(*form_player, market_id, draft);
-                           });
-            for (const int delta : {1, 10, 100}) {
-                auto next = draft;
-                next.price_cents = adjustTradePrice(draft.price_cents, delta, config_.market.price_min_cents,
-                                                    config_.market.price_max_cents);
-                form.addButton(std::format("+{}u", delta), std::nullopt, review_callback(next));
-            }
-        }
-
-        form.addDivider()
-            .addButton(std::string(messageText(language, Message::ConfirmButton)), std::nullopt,
-                       [this, market_id, draft, player_uuid](endstone::Player *form_player) {
-                           open_trade_forms_.erase(player_uuid);
-                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
-                               return;
-                           }
-                           form_player->closeForm();
-                           queueTradeSubmission(*form_player, market_id, draft);
-                       })
-            .addButton(std::string(messageText(language, Message::BackActions)), std::nullopt,
-                       [this, market_id, player_uuid](endstone::Player *form_player) {
-                           open_trade_forms_.erase(player_uuid);
-                           if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
-                               return;
-                           }
-                           form_player->closeForm();
-                           queueTradeForm(*form_player, market_id);
-                       })
+                if (selection == 0) {
+                    queueTradeSubmission(*form_player, market_id, draft);
+                } else {
+                    queueTradeInputForm(*form_player, market_id, draft);
+                }
+            })
             .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
         player.sendForm(std::move(form));
     } catch (const std::exception &error) {

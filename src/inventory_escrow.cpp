@@ -237,8 +237,10 @@ TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPro
     }
     if (available < requested_quantity) {
         const auto item_name = localized_item_name.empty() ? std::string_view(prototype.name) : localized_item_name;
+        const auto requirements = describeItemRequirements(prototype, language, item_name);
+        const auto requirement_suffix = requirements.empty() ? std::string{} : "\n" + requirements;
         throw UserError(tr(language, Message::InventoryInsufficient, same_type, item_name, available,
-                           requested_quantity, describeItemRequirements(prototype, language, item_name)));
+                           requested_quantity, requirement_suffix));
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &left, const auto &right) { return left.second.getAmount() < right.second.getAmount(); });

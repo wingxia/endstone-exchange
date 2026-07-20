@@ -15,9 +15,9 @@ namespace exchange {
 
 namespace {
 
-constexpr std::size_t MaxTextLength = 240;
-constexpr std::size_t MaxListItems = 32;
-constexpr std::size_t MaxExtraLines = 64;
+constexpr std::size_t MaxTextLength = 120;
+constexpr std::size_t MaxListItems = 8;
+constexpr std::size_t MaxExtraLines = 6;
 
 constexpr std::size_t languageIndex(const Language language) noexcept {
     return static_cast<std::size_t>(language);
@@ -211,8 +211,9 @@ std::string inlineListValue(const endstone::ListTag &list, const Language langua
 }
 
 void appendExtraTag(const std::string &path, const endstone::nbt::Tag &tag, std::vector<std::string> &lines,
-                    const std::size_t depth, const Language language) {
+                    const std::size_t depth, const Language language, bool &truncated) {
     if (lines.size() >= MaxExtraLines) {
+        truncated = true;
         return;
     }
     if (depth >= 8) {
@@ -245,9 +246,13 @@ void appendExtraTag(const std::string &path, const endstone::nbt::Tag &tag, std:
                                std::string(messageText(language, Message::ItemEmpty)));
             return;
         }
-        for (std::size_t index = 0; index < list.size() && lines.size() < MaxExtraLines; ++index) {
+        for (std::size_t index = 0; index < list.size(); ++index) {
+            if (lines.size() >= MaxExtraLines) {
+                truncated = true;
+                break;
+            }
             appendExtraTag(tr(language, Message::ItemListEntry, path, index + 1), list[index], lines, depth + 1,
-                           language);
+                           language, truncated);
         }
         return;
     }
@@ -259,10 +264,12 @@ void appendExtraTag(const std::string &path, const endstone::nbt::Tag &tag, std:
             return;
         }
         for (const auto &[key, value] : compound) {
-            appendExtraTag(path + " · " + friendlyNbtKey(key, language), value, lines, depth + 1, language);
             if (lines.size() >= MaxExtraLines) {
+                truncated = true;
                 break;
             }
+            appendExtraTag(path + " · " + friendlyNbtKey(key, language), value, lines, depth + 1, language,
+                           truncated);
         }
     }
 }
@@ -287,14 +294,14 @@ bool matchesItemIdentity(const ItemPrototype &prototype, const std::string_view 
 }
 
 std::string describeItemRequirements(const ItemPrototype &prototype, const Language language,
-                                     const std::string_view localized_item_name) {
+                                     const std::string_view /*localized_item_name*/) {
     auto remaining = prototype.nbt.empty() ? endstone::CompoundTag{} : NbtCodec::decode(prototype.nbt);
     std::vector<std::string> lines;
-    const auto item_name = localized_item_name.empty() ? std::string_view(prototype.name) : localized_item_name;
-    lines.emplace_back(tr(language, Message::ItemLabel, item_name));
-    lines.emplace_back(tr(language, Message::ItemData, prototype.data));
+    if (prototype.data != 0) {
+        lines.emplace_back(tr(language, Message::ItemData, prototype.data));
+    }
 
-    std::string display_name(messageText(language, Message::NoneValue));
+    std::optional<std::string> display_name;
     std::vector<std::string> lore;
     if (remaining.contains("display") && remaining.at("display").type() == endstone::nbt::Type::Compound) {
         auto &display = remaining.at("display").get<endstone::CompoundTag>();
@@ -322,10 +329,12 @@ std::string describeItemRequirements(const ItemPrototype &prototype, const Langu
             remaining.erase("display");
         }
     }
-    lines.emplace_back(tr(language, Message::ItemCustomName, display_name));
-    lines.emplace_back(tr(language, Message::ItemLore,
-                          lore.empty() ? std::string(messageText(language, Message::NoneValue))
-                                       : join(lore, descriptionSeparator(language))));
+    if (display_name) {
+        lines.emplace_back(tr(language, Message::ItemCustomName, *display_name));
+    }
+    if (!lore.empty()) {
+        lines.emplace_back(tr(language, Message::ItemLore, join(lore, descriptionSeparator(language))));
+    }
 
     std::vector<std::pair<std::int64_t, std::int64_t>> enchantments;
     if (remaining.contains("ench") && remaining.at("ench").type() == endstone::nbt::Type::List) {
@@ -361,48 +370,53 @@ std::string describeItemRequirements(const ItemPrototype &prototype, const Langu
     for (const auto &[id, level] : enchantments) {
         enchantment_lines.emplace_back(std::format("{} {}", enchantmentName(id, language), level));
     }
-    lines.emplace_back(tr(language, Message::ItemEnchantments,
-                          enchantment_lines.empty() ? std::string(messageText(language, Message::NoneValue))
-                                                    : join(enchantment_lines, listSeparator(language))));
+    if (!enchantment_lines.empty()) {
+        lines.emplace_back(tr(language, Message::ItemEnchantments,
+                              join(enchantment_lines, listSeparator(language))));
+    }
 
-    std::int64_t damage = 0;
     if (remaining.contains("Damage")) {
         if (const auto value = integerValue(remaining.at("Damage"))) {
-            damage = *value;
+            if (*value != 0) {
+                lines.emplace_back(tr(language, Message::ItemDurabilityDamage, *value));
+            }
             remaining.erase("Damage");
         }
     }
-    lines.emplace_back(tr(language, Message::ItemDurabilityDamage, damage));
 
     if (remaining.contains("RepairCost")) {
         if (const auto value = integerValue(remaining.at("RepairCost"))) {
-            lines.emplace_back(tr(language, Message::ItemRepairCost, *value));
+            if (*value != 0) {
+                lines.emplace_back(tr(language, Message::ItemRepairCost, *value));
+            }
             remaining.erase("RepairCost");
         }
     }
     if (remaining.contains("Unbreakable")) {
         if (const auto value = integerValue(remaining.at("Unbreakable"))) {
-            lines.emplace_back(tr(language, Message::ItemUnbreakable,
-                                  messageText(language, *value == 0 ? Message::NoValue : Message::YesValue)));
+            if (*value != 0) {
+                lines.emplace_back(
+                    tr(language, Message::ItemUnbreakable, messageText(language, Message::YesValue)));
+            }
             remaining.erase("Unbreakable");
         }
     }
 
     std::vector<std::string> extra_lines;
+    bool truncated = false;
     for (const auto &[key, value] : remaining) {
-        appendExtraTag(friendlyNbtKey(key, language), value, extra_lines, 0, language);
         if (extra_lines.size() >= MaxExtraLines) {
+            truncated = true;
             break;
         }
+        appendExtraTag(friendlyNbtKey(key, language), value, extra_lines, 0, language, truncated);
     }
-    if (extra_lines.empty()) {
-        lines.emplace_back(messageText(language, Message::ItemOtherNone));
-    } else {
+    if (!extra_lines.empty()) {
         lines.emplace_back(messageText(language, Message::ItemOtherHeader));
         for (const auto &line : extra_lines) {
             lines.emplace_back("- " + line);
         }
-        if (extra_lines.size() >= MaxExtraLines) {
+        if (truncated) {
             lines.emplace_back(messageText(language, Message::ItemOtherMany));
         }
     }

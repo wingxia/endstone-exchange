@@ -1,8 +1,11 @@
 #include "endstone_exchange/trade_form.hpp"
 
+#include "endstone_exchange/market_display.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <format>
 #include <limits>
 #include <stdexcept>
 
@@ -31,6 +34,28 @@ std::int64_t parseWholeNumber(const std::string_view raw, const std::int64_t min
         throw UserError(tr(language, Message::WholeNumberRange, messageText(language, field), minimum, maximum));
     }
     return value;
+}
+
+std::string priceLevelsText(const std::string_view heading, const std::vector<PriceLevel> &levels,
+                            const std::size_t visible_levels) {
+    std::string result(heading);
+    result += "  ";
+    if (levels.empty()) {
+        result += "--";
+        return result;
+    }
+
+    const auto shown = std::min(levels.size(), std::max<std::size_t>(visible_levels, 1));
+    for (std::size_t index = 0; index < shown; ++index) {
+        if (index != 0) {
+            result += "  ·  ";
+        }
+        result += std::format("{} x {}", formatUnitPrice(levels[index].price_cents), levels[index].quantity);
+    }
+    if (levels.size() > shown) {
+        result += "  ·  …";
+    }
+    return result;
 }
 
 } // namespace
@@ -62,13 +87,15 @@ std::string_view tradeActionLabel(const TradeAction action, const Language langu
 }
 
 std::vector<TradeAction> availableTradeActions(const bool has_bids, const bool has_asks) {
-    std::vector<TradeAction> result{TradeAction::LimitBuy, TradeAction::LimitSell};
+    std::vector<TradeAction> result;
     if (has_asks) {
         result.push_back(TradeAction::MarketBuy);
     }
     if (has_bids) {
         result.push_back(TradeAction::MarketSell);
     }
+    result.push_back(TradeAction::LimitBuy);
+    result.push_back(TradeAction::LimitSell);
     return result;
 }
 
@@ -83,6 +110,45 @@ Cents defaultTradePrice(const Cents minimum, const Cents maximum, const Cents st
         ++steps;
     }
     return minimum + steps * step;
+}
+
+std::string tradeOverviewText(const OrderBook &book, const std::string_view formatted_balance,
+                              const int sellable_quantity, const std::string_view item_requirements,
+                              const Language language, const std::size_t visible_levels) {
+    auto result = priceLevelsText(
+        std::format("§a{}§r", messageText(language, Message::HologramWanted)), book.bids, visible_levels);
+    result += "\n";
+    result += priceLevelsText(
+        std::format("§c{}§r", messageText(language, Message::HologramForSale)), book.asks, visible_levels);
+    result += "\n";
+    result += tr(language, Message::TradeOverviewAccount, formatted_balance, sellable_quantity);
+    if (!item_requirements.empty()) {
+        result += "\n";
+        result += messageText(language, Message::TradeOverviewRequirements);
+        result += "\n";
+        result += item_requirements;
+    }
+    return result;
+}
+
+std::string tradeReviewText(const TradeDraft &draft, const Language language) {
+    auto result = std::format("§6{}§r\n{}", tradeActionLabel(draft.action, language),
+                              tr(language, Message::QuantityValue, draft.quantity));
+    if (!tradeActionUsesPrice(draft.action)) {
+        result += "\n";
+        result += messageText(language, draft.action == TradeAction::MarketBuy ? Message::ReviewDirectBuy
+                                                                               : Message::ReviewDirectSell);
+        return result;
+    }
+
+    result += "\n";
+    result += tr(language, Message::UnitPriceValue, formatUnitPrice(draft.price_cents));
+    result += "\n";
+    const auto total = draft.price_cents * static_cast<Cents>(draft.quantity);
+    result += tr(language, tradeActionSide(draft.action) == Side::Buy ? Message::ReviewMaximumPayment
+                                                                      : Message::ReviewExpectedIncome,
+                 formatUnitPrice(total));
+    return result;
 }
 
 std::vector<std::string> textFormValues(const std::string_view response, const Language language) {
@@ -208,20 +274,6 @@ Cents parseTradePrice(const std::string_view text, const Cents minimum, const Ce
         throw UserError(tr(language, Message::PriceStep, step / 100));
     }
     return cents;
-}
-
-int adjustTradeQuantity(const int current, const int delta, const int maximum) noexcept {
-    const auto candidate = static_cast<long long>(current) + static_cast<long long>(delta);
-    return static_cast<int>(std::clamp(candidate, 1LL, static_cast<long long>(std::max(maximum, 1))));
-}
-
-Cents adjustTradePrice(const Cents current, const int delta_units, const Cents minimum, const Cents maximum) noexcept {
-    if (minimum > maximum) {
-        return current;
-    }
-    const auto delta = static_cast<__int128>(delta_units) * 100;
-    const auto candidate = static_cast<__int128>(current) + delta;
-    return static_cast<Cents>(std::clamp(candidate, static_cast<__int128>(minimum), static_cast<__int128>(maximum)));
 }
 
 } // namespace exchange

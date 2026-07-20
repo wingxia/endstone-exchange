@@ -97,18 +97,18 @@ void testTradeFormFlow() {
 
     const auto bids_only = exchange::availableTradeActions(true, false);
     require(bids_only ==
-                std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell, TradeAction::MarketSell},
+                std::vector<TradeAction>{TradeAction::MarketSell, TradeAction::LimitBuy, TradeAction::LimitSell},
             "a buy order must expose direct sell only");
 
     const auto asks_only = exchange::availableTradeActions(false, true);
     require(asks_only ==
-                std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell, TradeAction::MarketBuy},
+                std::vector<TradeAction>{TradeAction::MarketBuy, TradeAction::LimitBuy, TradeAction::LimitSell},
             "a sell order must expose direct buy only");
 
     const auto both = exchange::availableTradeActions(true, true);
-    require(both == std::vector<TradeAction>{TradeAction::LimitBuy, TradeAction::LimitSell,
-                                             TradeAction::MarketBuy, TradeAction::MarketSell},
-            "both sides of the book must expose both direct trade actions");
+    require(both == std::vector<TradeAction>{TradeAction::MarketBuy, TradeAction::MarketSell,
+                                             TradeAction::LimitBuy, TradeAction::LimitSell},
+            "available direct actions must be first and limit actions must remain available");
     require(exchange::tradeActionUsesPrice(TradeAction::LimitBuy) &&
                 exchange::tradeActionUsesPrice(TradeAction::LimitSell) &&
                 !exchange::tradeActionUsesPrice(TradeAction::MarketBuy) &&
@@ -175,14 +175,28 @@ void testTradeFormFlow() {
     }
     require(rejected, "price input must reject values above 5000u");
 
-    require(exchange::adjustTradeQuantity(1, -100, 640) == 1 &&
-                exchange::adjustTradeQuantity(630, 100, 640) == 640 &&
-                exchange::adjustTradeQuantity(10, 1, 640) == 11,
-            "quantity adjustment buttons must clamp to 1 through 640");
-    require(exchange::adjustTradePrice(100, -100, 100, 500'000) == 100 &&
-                exchange::adjustTradePrice(499'000, 100, 100, 500'000) == 500'000 &&
-                exchange::adjustTradePrice(1'000, 1, 100, 500'000) == 1'100,
-            "price adjustment buttons must clamp to 1u through 5000u");
+    exchange::OrderBook compact_book;
+    compact_book.bids = {{1'000, 90}, {900, 20}, {800, 5}};
+    compact_book.asks = {{1'100, 4}};
+    const auto overview = exchange::tradeOverviewText(compact_book, "9900u", 64, {});
+    require(overview ==
+                "§a收购§r  10u x 90  ·  9u x 20  ·  …\n"
+                "§c出售§r  11u x 4\n"
+                "§6余额§r §e9900u§r  ·  §6可卖§r §e64 件§r",
+            "trade overview must fit the book and account state into three compact lines");
+    require(overview.find("\n\n") == std::string::npos, "compact trade overview must not contain blank lines");
+
+    const exchange::TradeDraft limit_buy{TradeAction::LimitBuy, 5, 1'000};
+    const auto limit_review = exchange::tradeReviewText(limit_buy);
+    require(limit_review.find("数量：5 件") != std::string::npos &&
+                limit_review.find("每件价格：10u") != std::string::npos &&
+                limit_review.find("最多支付：50u") != std::string::npos,
+            "limit confirmation must show quantity, whole-u price and maximum payment");
+    const exchange::TradeDraft direct_sell{TradeAction::MarketSell, 7, 0};
+    const auto direct_review = exchange::tradeReviewText(direct_sell);
+    require(direct_review.find("数量：7 件") != std::string::npos &&
+                direct_review.find("每件价格") == std::string::npos,
+            "direct confirmation must stay compact and hide price settings");
 }
 
 void testLocalization() {
@@ -218,23 +232,28 @@ void testLocalization() {
                 exchange::tradeActionLabel(exchange::TradeAction::MarketBuy, Language::Japanese) == "すぐ購入",
             "trade action labels follow client language");
 
+    exchange::OrderBook localized_book;
+    localized_book.bids = {{1'000, 9}};
+    localized_book.asks = {{1'100, 4}};
+    for (const auto language : {Language::SimplifiedChinese, Language::English, Language::TraditionalChinese,
+                                Language::Japanese}) {
+        const auto overview = exchange::tradeOverviewText(localized_book, "100u", 3, {}, language);
+        require(std::ranges::count(overview, '\n') == 2 && overview.find("\n\n") == std::string::npos,
+                "every language must keep a plain-item overview to three non-empty lines");
+        const auto review = exchange::tradeReviewText(
+            exchange::TradeDraft{exchange::TradeAction::LimitSell, 5, 1'000}, language);
+        require(std::ranges::count(review, '\n') == 3 && review.find("10u") != std::string::npos &&
+                    review.find("50u") != std::string::npos,
+                "every language must keep a limit review to four compact lines with whole-u values");
+    }
+
     const exchange::ItemPrototype item{"minecraft:emerald_block", 0, {}, "Emerald Block"};
     const auto simplified = exchange::describeItemRequirements(item, Language::SimplifiedChinese, "绿宝石块");
     const auto english = exchange::describeItemRequirements(item, Language::English, "Emerald Block");
     const auto traditional = exchange::describeItemRequirements(item, Language::TraditionalChinese, "綠寶石方塊");
     const auto japanese = exchange::describeItemRequirements(item, Language::Japanese, "エメラルドブロック");
-    require(simplified.find("物品：绿宝石块") != std::string::npos &&
-                simplified.find("附魔：无") != std::string::npos,
-            "simplified Chinese item requirements");
-    require(english.find("Item: Emerald Block") != std::string::npos &&
-                english.find("Enchantments: none") != std::string::npos,
-            "English item requirements");
-    require(traditional.find("物品：綠寶石方塊") != std::string::npos &&
-                traditional.find("附魔：無") != std::string::npos,
-            "traditional Chinese item requirements");
-    require(japanese.find("アイテム：エメラルドブロック") != std::string::npos &&
-                japanese.find("エンチャント：なし") != std::string::npos,
-            "Japanese item requirements");
+    require(simplified.empty() && english.empty() && traditional.empty() && japanese.empty(),
+            "plain item defaults must not create requirements in any language");
 
     for (const auto [language, expected] :
          std::array<std::pair<Language, std::string_view>, 4>{{
@@ -339,6 +358,12 @@ void testHologramAppearancePacket() {
 }
 
 void testMarketDisplay() {
+    require(exchange::formatCurrency(875'300) == "8753u" &&
+                exchange::formatCurrency(875'350) == "8753.50u" &&
+                exchange::formatCurrency(-50) == "-0.50u" &&
+                exchange::formatCurrency(std::numeric_limits<exchange::Cents>::min()) ==
+                    "-92233720368547758.08u",
+            "currency display must omit only redundant decimals and remain overflow-safe");
     require(exchange::blockToChunk(0) == 0 && exchange::blockToChunk(15) == 0 &&
                 exchange::blockToChunk(16) == 1 && exchange::blockToChunk(-1) == -1 &&
                 exchange::blockToChunk(-16) == -1 && exchange::blockToChunk(-17) == -2,
@@ -409,10 +434,17 @@ void testCanonicalItemIdentity() {
     const exchange::ItemPrototype plain_requirements{
         "minecraft:emerald_block", 0, exchange::NbtCodec::encode(endstone::CompoundTag{}), "Emerald Block"};
     const auto plain_text = exchange::describeItemRequirements(plain_requirements);
-    require(
-        plain_text.find("自定义名称：无") != std::string::npos && plain_text.find("附魔：无") != std::string::npos &&
-            plain_text.find("耐久损耗：0") != std::string::npos && plain_text.find("其他属性：无") != std::string::npos,
-        "plain item requirements must explicitly state every absent special property");
+    require(plain_text.empty(), "plain items must not list absent or zero-valued properties");
+
+    endstone::CompoundTag default_properties;
+    default_properties.insert_or_assign("Damage", endstone::IntTag(0));
+    default_properties.insert_or_assign("RepairCost", endstone::IntTag(0));
+    default_properties.insert_or_assign("Unbreakable", endstone::ByteTag(0));
+    default_properties.insert_or_assign("ench", endstone::ListTag{});
+    const exchange::ItemPrototype defaults{"minecraft:diamond_pickaxe", 0,
+                                           exchange::NbtCodec::encode(default_properties), "Diamond Pickaxe"};
+    require(exchange::describeItemRequirements(defaults).empty(),
+            "serialized default NBT values must stay hidden from players");
 
     endstone::CompoundTag display;
     display.insert_or_assign("Name", endstone::StringTag("§a矿工镐"));

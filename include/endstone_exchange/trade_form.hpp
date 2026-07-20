@@ -3,6 +3,7 @@
 #include "endstone_exchange/domain.hpp"
 #include "endstone_exchange/localization.hpp"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +25,12 @@ struct TradeDraft {
     TradeAction action, Language language = Language::SimplifiedChinese) noexcept;
 [[nodiscard]] std::vector<TradeAction> availableTradeActions(bool has_bids, bool has_asks);
 [[nodiscard]] Cents defaultTradePrice(Cents minimum, Cents maximum, Cents step, Cents reference);
+[[nodiscard]] std::string tradeOverviewText(
+    const OrderBook &book, std::string_view formatted_balance, int sellable_quantity,
+    std::string_view item_requirements, Language language = Language::SimplifiedChinese,
+    std::size_t visible_levels = 2);
+[[nodiscard]] std::string tradeReviewText(
+    const TradeDraft &draft, Language language = Language::SimplifiedChinese);
 
 [[nodiscard]] std::vector<std::string> textFormValues(
     std::string_view response, Language language = Language::SimplifiedChinese);
@@ -31,7 +38,5 @@ struct TradeDraft {
                                      Language language = Language::SimplifiedChinese);
 [[nodiscard]] Cents parseTradePrice(std::string_view text, Cents minimum, Cents maximum, Cents step,
                                     Language language = Language::SimplifiedChinese);
-[[nodiscard]] int adjustTradeQuantity(int current, int delta, int maximum) noexcept;
-[[nodiscard]] Cents adjustTradePrice(Cents current, int delta_units, Cents minimum, Cents maximum) noexcept;
 
 } // namespace exchange

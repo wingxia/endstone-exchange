@@ -1,6 +1,7 @@
 #include "endstone_exchange/market_display.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <format>
 
 namespace exchange {
@@ -49,6 +50,18 @@ std::optional<BlockOffset> itemFrameSupportOffset(const int facing_direction) no
 
 std::string formatUnitPrice(const Cents cents) {
     return std::format("{}u", cents / 100);
+}
+
+std::string formatCurrency(const Cents cents) {
+    const auto negative = cents < 0;
+    const auto magnitude = negative ? static_cast<std::uint64_t>(-(cents + 1)) + 1
+                                    : static_cast<std::uint64_t>(cents);
+    const auto whole = magnitude / 100;
+    const auto fraction = magnitude % 100;
+    if (fraction == 0) {
+        return std::format("{}{}u", negative ? "-" : "", whole);
+    }
+    return std::format("{}{}.{:02}u", negative ? "-" : "", whole, fraction);
 }
 
 std::string marketHologramText(const Market &market, const OrderBook &book, const Language language,
