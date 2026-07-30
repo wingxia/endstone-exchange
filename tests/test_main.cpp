@@ -105,6 +105,20 @@ void testConfig() {
                 config.market.price_step_cents == 100,
             "whole-u price range parsing");
     require(config.market.frame_capture_delay_ticks == 80, "item-frame capture delay");
+    require(config.economy.provider == "internal" && config.economy.unit_cents == 100,
+            "internal economy defaults");
+    config.economy.provider = "umoney";
+    config.economy.bridge_token = "0123456789abcdef0123456789abcdef";
+    config.market.initial_balance_cents = 0;
+    config.validate();
+    bool rejected_umoney_mint = false;
+    try {
+        config.market.initial_balance_cents = 100;
+        config.validate();
+    } catch (const std::exception &) {
+        rejected_umoney_mint = true;
+    }
+    require(rejected_umoney_mint, "UMoney mode must reject minted initial balances");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
@@ -627,6 +641,7 @@ void testLiveLevelDbStructureCapture() {
 void truncateExchangeTables(exchange::Database &database) {
     database.execute("SET FOREIGN_KEY_CHECKS=0");
     database.execute("TRUNCATE TABLE exchange_target_bindings");
+    database.execute("TRUNCATE TABLE exchange_economy_transfers");
     database.execute("TRUNCATE TABLE exchange_balance_ledger");
     database.execute("TRUNCATE TABLE exchange_sell_escrows");
     database.execute("TRUNCATE TABLE exchange_delivery_claims");
@@ -677,7 +692,11 @@ void testDatabaseIntegration() {
     require(reopenable_column.size() == 1, "version 5 upgrade must add the reopenable market column");
     database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
-    require(exchange::cellInt(schema_version.front(), 0) == 7, "database migrations must be idempotent at version 7");
+    require(exchange::cellInt(schema_version.front(), 0) == 8, "database migrations must be idempotent at version 8");
+    const auto economy_schema = database.query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+        "AND TABLE_NAME='exchange_economy_transfers' AND COLUMN_NAME='amount_units'");
+    require(economy_schema.size() == 1, "version 8 must create durable UMoney transfer storage");
     const auto book_schema = database.query(
         "SELECT m.book_id,b.id FROM exchange_markets m LEFT JOIN exchange_books b ON b.id=m.book_id LIMIT 1");
     require(book_schema.empty() || exchange::cellInt64(book_schema.front(), 0) == exchange::cellInt64(book_schema.front(), 1),
@@ -717,6 +736,9 @@ void testDatabaseIntegration() {
     std::this_thread::sleep_for(std::chrono::seconds(2));
     require(!database.query("SELECT 1").empty(), "first query after idle timeout must reconnect and retry once");
     truncateExchangeTables(database);
+    exchange::ExchangeService zero_balance_service(database, 0, 640);
+    require(zero_balance_service.economyBackingDeficit() == 0,
+            "a fresh zero-balance economy must start fully backed");
     exchange::ExchangeService service(database, 100'000, 640);
 
     constexpr std::string_view Alice = "00000000-0000-0000-0000-000000000001";
@@ -725,6 +747,68 @@ void testDatabaseIntegration() {
     service.ensureAccount(Alice, "Alice");
     service.ensureAccount(Bob, "Bob");
     service.ensureAccount(Charlie, "Charlie");
+
+    const auto deposit = service.prepareEconomyTransfer(
+        Alice, "Alice", exchange::EconomyTransferDirection::Deposit, 1'000, 10);
+    require(deposit.status == exchange::EconomyTransferStatus::Prepared &&
+                deposit.amount_units == 10 && service.balance(Alice) == 100'000,
+            "deposit preparation must persist exact external units without minting exchange funds");
+    service.markEconomyTransferExternalApplied(deposit.id, 990);
+    service.markEconomyTransferExternalApplied(deposit.id, 990);
+    require(service.completeEconomyTransfer(deposit.id) == 101'000 &&
+                service.completeEconomyTransfer(deposit.id) == 101'000,
+            "an externally applied deposit must credit exactly once");
+
+    const auto withdrawal = service.prepareEconomyTransfer(
+        Alice, "Alice", exchange::EconomyTransferDirection::Withdraw, 1'000, 10);
+    require(service.balance(Alice) == 100'000,
+            "withdrawal preparation must reserve exchange funds before touching UMoney");
+    exchange::ExchangeService restarted_after_prepare(database, 100'000, 640);
+    const auto prepared_after_restart = restarted_after_prepare.pendingEconomyTransfers();
+    require(std::any_of(prepared_after_restart.begin(), prepared_after_restart.end(),
+                        [&](const exchange::EconomyTransfer &transfer) {
+                            return transfer.id == withdrawal.id &&
+                                   transfer.status == exchange::EconomyTransferStatus::Prepared &&
+                                   transfer.amount_units == 10;
+                        }),
+            "a prepared withdrawal must remain recoverable after restart");
+    restarted_after_prepare.markEconomyTransferExternalApplied(withdrawal.id, 1'000);
+    require(restarted_after_prepare.completeEconomyTransfer(withdrawal.id) == 100'000,
+            "withdrawal completion must not debit reserved funds twice");
+
+    const auto failed_withdrawal = service.prepareEconomyTransfer(
+        Bob, "Bob", exchange::EconomyTransferDirection::Withdraw, 700, 7);
+    require(service.balance(Bob) == 99'300, "failed-withdrawal test must begin with a durable reserve");
+    require(service.failEconomyTransfer(failed_withdrawal.id, "not applied") == 100'000 &&
+                service.failEconomyTransfer(failed_withdrawal.id, "not applied") == 100'000,
+            "a definitely unapplied withdrawal must refund exactly once");
+
+    const auto crash_deposit = service.prepareEconomyTransfer(
+        Charlie, "Charlie", exchange::EconomyTransferDirection::Deposit, 500, 5);
+    service.markEconomyTransferExternalApplied(crash_deposit.id, 495);
+    exchange::ExchangeService restarted_after_external_apply(database, 100'000, 640);
+    require(restarted_after_external_apply.completeEconomyTransfer(crash_deposit.id) == 100'500,
+            "restart recovery must finish a deposit whose external side was already applied");
+    const auto balancing_withdrawal = restarted_after_external_apply.prepareEconomyTransfer(
+        Charlie, "Charlie", exchange::EconomyTransferDirection::Withdraw, 500, 5);
+    restarted_after_external_apply.markEconomyTransferExternalApplied(balancing_withdrawal.id, 500);
+    require(restarted_after_external_apply.completeEconomyTransfer(balancing_withdrawal.id) == 100'000,
+            "deposit and withdrawal round trip must conserve exchange funds");
+
+    const auto blocked_deposit = service.prepareEconomyTransfer(
+        Bob, "Bob", exchange::EconomyTransferDirection::Deposit, 100, 1);
+    service.blockEconomyTransfer(blocked_deposit.id, "manual reconciliation required");
+    require(service.findEconomyTransfer(blocked_deposit.id)->status ==
+                exchange::EconomyTransferStatus::Blocked &&
+                service.pendingEconomyTransferCount() == 1,
+            "ambiguous external state must be frozen for operator review rather than retried");
+    bool blocked_apply_rejected = false;
+    try {
+        service.markEconomyTransferExternalApplied(blocked_deposit.id, 0);
+    } catch (const std::exception &) {
+        blocked_apply_rejected = true;
+    }
+    require(blocked_apply_rejected, "blocked transfers must not be auto-completed");
 
     endstone::CompoundTag nbt;
     nbt.insert_or_assign("custom", endstone::StringTag("preserved"));
@@ -1172,6 +1256,8 @@ void testDatabaseIntegration() {
         "(SELECT COALESCE(SUM(reserved_cents),0) FROM exchange_orders WHERE status IN ('OPEN','PARTIAL'))");
     require(exchange::cellInt64(money_total.front(), 0) == 300'000,
             "account balances plus funded buy reserves must conserve all exchange money");
+    require(service.economyBackingDeficit() == 300'000,
+            "legacy internal balances must be visible as unbacked before enabling UMoney");
     const auto order_invariant_failures = database.query(
         "SELECT id FROM exchange_orders WHERE "
         "(side='BUY' AND status IN ('OPEN','PARTIAL') AND reserved_cents<>price_cents*remaining_qty) OR "

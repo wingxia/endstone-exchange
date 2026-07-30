@@ -7,6 +7,7 @@
 #include "endstone_exchange/localization.hpp"
 #include "endstone_exchange/market_display.hpp"
 #include "endstone_exchange/trade_form.hpp"
+#include "endstone_exchange/umoney_gateway.hpp"
 
 #include <endstone/endstone.hpp>
 
@@ -58,7 +59,9 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_map<std::string, std::unordered_set<std::string>> join_loaded_chunks_;
     std::unordered_set<Id> pending_hologram_recreates_;
     std::shared_ptr<endstone::Task> refresh_task_;
+    std::shared_ptr<endstone::Task> economy_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
+    std::unique_ptr<UmoneyTransferWorker> economy_worker_;
     bool ready_{false};
 
     [[nodiscard]] bool isExchanger(const std::optional<endstone::ItemStack> &item) const;
@@ -94,6 +97,10 @@ class ExchangePlugin : public endstone::Plugin {
     void queueInventoryResync(endstone::Player &player);
     void giveExchanger(endstone::Player &player);
     void localizeExchangers(endstone::Player &player);
+    void processEconomyTransfers();
+    void queueEconomyTransfer(const EconomyTransfer &transfer);
+    void notifyEconomyTransfer(const EconomyTransfer &transfer, Cents exchange_balance, bool completed,
+                               std::string_view error_code = {}, std::string_view error = {});
 
     void refreshHolograms();
     void refreshHologram(const Market &market);

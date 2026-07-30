@@ -20,3 +20,14 @@ order_book_depth = 5
 hologram_refresh_ticks = 20
 frame_capture_delay_ticks = 80
 cleanup_structure_captures = true
+
+[economy]
+# "internal" keeps the built-in exchange balance only. "umoney" enables
+# crash-recoverable deposits and withdrawals through the local bridge.
+provider = "internal"
+bridge_host = "127.0.0.1"
+bridge_port = 8765
+bridge_token = ""
+unit_cents = 100
+request_timeout_milliseconds = 1000
+recovery_interval_ticks = 100

@@ -15,6 +15,8 @@ enum class Side { Buy, Sell };
 enum class OrderType { Limit, Market };
 enum class DeliveryClaimStatus { Prepared, Applied, Canceled };
 enum class SellEscrowStatus { Prepared, Tagged, Ordered, Canceled };
+enum class EconomyTransferDirection { Deposit, Withdraw };
+enum class EconomyTransferStatus { Prepared, ExternalApplied, Completed, Failed, Blocked };
 
 struct ItemPrototype {
     std::string type;
@@ -113,6 +115,20 @@ struct SellEscrow {
     bool cleaned{false};
 };
 
+struct EconomyTransfer {
+    Id id{0};
+    std::string operation_key;
+    std::string player_uuid;
+    std::string player_name;
+    EconomyTransferDirection direction{EconomyTransferDirection::Deposit};
+    Cents amount_cents{0};
+    std::int64_t amount_units{0};
+    EconomyTransferStatus status{EconomyTransferStatus::Prepared};
+    std::optional<std::int64_t> external_balance_units;
+    int attempt_count{0};
+    std::string last_error;
+};
+
 [[nodiscard]] inline const char *toSql(TargetKind kind) {
     return kind == TargetKind::Block ? "BLOCK" : "ACTOR";
 }
@@ -123,6 +139,10 @@ struct SellEscrow {
 
 [[nodiscard]] inline const char *toSql(OrderType type) {
     return type == OrderType::Limit ? "LIMIT" : "MARKET";
+}
+
+[[nodiscard]] inline const char *toSql(EconomyTransferDirection direction) {
+    return direction == EconomyTransferDirection::Deposit ? "DEPOSIT" : "WITHDRAW";
 }
 
 } // namespace exchange

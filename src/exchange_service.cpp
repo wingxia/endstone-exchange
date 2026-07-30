@@ -110,6 +110,25 @@ SellEscrow sellEscrowFromRow(const QueryRow &row) {
             cellInt(row, 15) != 0};
 }
 
+EconomyTransferStatus economyTransferStatus(const std::string_view status) {
+    if (status == "PREPARED") {
+        return EconomyTransferStatus::Prepared;
+    }
+    if (status == "EXTERNAL_APPLIED") {
+        return EconomyTransferStatus::ExternalApplied;
+    }
+    if (status == "COMPLETED") {
+        return EconomyTransferStatus::Completed;
+    }
+    if (status == "FAILED") {
+        return EconomyTransferStatus::Failed;
+    }
+    if (status == "BLOCKED") {
+        return EconomyTransferStatus::Blocked;
+    }
+    throw std::runtime_error("economy transfer has an unknown status");
+}
+
 } // namespace
 
 ExchangeService::ExchangeService(Database &database, const Cents initial_balance_cents, const int max_order_quantity)
@@ -983,7 +1002,7 @@ std::vector<SellEscrow> ExchangeService::unfinishedSellEscrows(const std::string
 }
 
 std::optional<SellEscrow> ExchangeService::findSellEscrow(const Id escrow_id,
-                                                          const std::string_view player_uuid) {
+                                                           const std::string_view player_uuid) {
     const auto rows = database_.query(std::format(
         "SELECT e.id,e.market_id,m.item_type,m.item_data,m.item_nbt,m.item_name,e.player_uuid,e.player_name,"
         "e.order_type,e.price_cents,e.requested_qty,e.tagged_qty,e.receipt_count,e.status,e.order_id,"
@@ -991,6 +1010,198 @@ std::optional<SellEscrow> ExchangeService::findSellEscrow(const Id escrow_id,
         "WHERE e.id={} AND e.player_uuid={}",
         escrow_id, database_.quote(player_uuid)));
     return rows.empty() ? std::nullopt : std::optional<SellEscrow>(sellEscrowFromRow(rows.front()));
+}
+
+EconomyTransfer ExchangeService::prepareEconomyTransfer(const std::string_view player_uuid,
+                                                        const std::string_view player_name,
+                                                        const EconomyTransferDirection direction,
+                                                        const Cents amount_cents,
+                                                        const std::int64_t amount_units) {
+    if (player_uuid.empty() || player_name.empty()) {
+        throw std::runtime_error("economy transfer identity is incomplete");
+    }
+    if (amount_cents <= 0 || amount_units <= 0) {
+        throw std::runtime_error("economy transfer amount must be positive");
+    }
+    ensureAccount(player_uuid, player_name);
+
+    Transaction transaction(database_);
+    database_.execute(std::format(
+        "INSERT INTO exchange_economy_transfers("
+        "operation_key,player_uuid,player_name,direction,amount_cents,amount_units) "
+        "VALUES (UUID(),{},{},{},{},{})",
+        database_.quote(player_uuid), database_.quote(player_name), database_.quote(toSql(direction)), amount_cents,
+        amount_units));
+    const auto transfer_id = static_cast<Id>(database_.lastInsertId());
+    if (direction == EconomyTransferDirection::Withdraw) {
+        debit(player_uuid, amount_cents, "UMONEY_WITHDRAW_RESERVED", "ECONOMY_TRANSFER", transfer_id);
+    }
+    transaction.commit();
+
+    const auto transfer = findEconomyTransfer(transfer_id);
+    if (!transfer) {
+        throw std::runtime_error("prepared economy transfer could not be reloaded");
+    }
+    return *transfer;
+}
+
+std::vector<EconomyTransfer> ExchangeService::pendingEconomyTransfers(const int limit) {
+    if (limit <= 0 || limit > 100) {
+        throw std::runtime_error("economy transfer query limit must be between 1 and 100");
+    }
+    const auto rows = database_.query(std::format(
+        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,external_balance_units,"
+        "attempt_count,COALESCE(last_error,'') FROM exchange_economy_transfers "
+        "WHERE status IN ('PREPARED','EXTERNAL_APPLIED') ORDER BY id LIMIT {}",
+        limit));
+    std::vector<EconomyTransfer> result;
+    result.reserve(rows.size());
+    for (const auto &row : rows) {
+        result.push_back(economyTransferFromRow(row));
+    }
+    return result;
+}
+
+std::optional<EconomyTransfer> ExchangeService::findEconomyTransfer(const Id transfer_id) {
+    const auto rows = database_.query(std::format(
+        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,external_balance_units,"
+        "attempt_count,COALESCE(last_error,'') FROM exchange_economy_transfers WHERE id={}",
+        transfer_id));
+    return rows.empty() ? std::nullopt : std::optional<EconomyTransfer>(economyTransferFromRow(rows.front()));
+}
+
+void ExchangeService::recordEconomyTransferAttempt(const Id transfer_id, const std::string_view error) {
+    const auto safe_error = std::string(error.substr(0, 500));
+    database_.execute(std::format(
+        "UPDATE exchange_economy_transfers SET attempt_count=attempt_count+1,last_error={} "
+        "WHERE id={} AND status='PREPARED'",
+        database_.quote(safe_error), transfer_id));
+    if (database_.affectedRows() != 1) {
+        const auto transfer = findEconomyTransfer(transfer_id);
+        if (!transfer || transfer->status == EconomyTransferStatus::Failed) {
+            throw std::runtime_error("prepared economy transfer does not exist");
+        }
+    }
+}
+
+void ExchangeService::markEconomyTransferExternalApplied(const Id transfer_id,
+                                                         const std::int64_t external_balance_units) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(
+        std::format("SELECT status FROM exchange_economy_transfers WHERE id={} FOR UPDATE", transfer_id));
+    if (rows.empty()) {
+        throw std::runtime_error("economy transfer does not exist");
+    }
+    const auto status = economyTransferStatus(cellString(rows.front(), 0));
+    if (status == EconomyTransferStatus::Failed || status == EconomyTransferStatus::Blocked) {
+        throw std::runtime_error("failed or blocked economy transfer cannot be applied");
+    }
+    if (status == EconomyTransferStatus::Prepared) {
+        database_.execute(std::format(
+            "UPDATE exchange_economy_transfers SET status='EXTERNAL_APPLIED',external_balance_units={},"
+            "external_applied_at=CURRENT_TIMESTAMP(6),attempt_count=attempt_count+1,last_error=NULL WHERE id={}",
+            external_balance_units, transfer_id));
+    }
+    transaction.commit();
+}
+
+Cents ExchangeService::completeEconomyTransfer(const Id transfer_id) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(std::format(
+        "SELECT player_uuid,direction,amount_cents,status FROM exchange_economy_transfers WHERE id={} FOR UPDATE",
+        transfer_id));
+    if (rows.empty()) {
+        throw std::runtime_error("economy transfer does not exist");
+    }
+    const auto player_uuid = cellString(rows.front(), 0);
+    const auto direction = cellString(rows.front(), 1);
+    const auto amount_cents = cellInt64(rows.front(), 2);
+    const auto status = economyTransferStatus(cellString(rows.front(), 3));
+    if (status == EconomyTransferStatus::Failed) {
+        throw std::runtime_error("failed economy transfer cannot be completed");
+    }
+    if (status == EconomyTransferStatus::Completed) {
+        const auto result = lockedBalance(player_uuid);
+        transaction.commit();
+        return result;
+    }
+    if (status != EconomyTransferStatus::ExternalApplied) {
+        throw std::runtime_error("economy transfer external operation is not applied");
+    }
+    if (direction == "DEPOSIT") {
+        credit(player_uuid, amount_cents, "UMONEY_DEPOSIT", "ECONOMY_TRANSFER", transfer_id);
+    }
+    database_.execute(std::format(
+        "UPDATE exchange_economy_transfers SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),last_error=NULL "
+        "WHERE id={}",
+        transfer_id));
+    const auto result = lockedBalance(player_uuid);
+    transaction.commit();
+    return result;
+}
+
+Cents ExchangeService::failEconomyTransfer(const Id transfer_id, const std::string_view error) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(std::format(
+        "SELECT player_uuid,direction,amount_cents,status FROM exchange_economy_transfers WHERE id={} FOR UPDATE",
+        transfer_id));
+    if (rows.empty()) {
+        throw std::runtime_error("economy transfer does not exist");
+    }
+    const auto player_uuid = cellString(rows.front(), 0);
+    const auto direction = cellString(rows.front(), 1);
+    const auto amount_cents = cellInt64(rows.front(), 2);
+    const auto status = economyTransferStatus(cellString(rows.front(), 3));
+    if (status == EconomyTransferStatus::ExternalApplied || status == EconomyTransferStatus::Completed ||
+        status == EconomyTransferStatus::Blocked) {
+        throw std::runtime_error("applied economy transfer cannot be failed");
+    }
+    if (status == EconomyTransferStatus::Prepared) {
+        if (direction == "WITHDRAW") {
+            credit(player_uuid, amount_cents, "UMONEY_WITHDRAW_REFUND", "ECONOMY_TRANSFER", transfer_id);
+        }
+        const auto safe_error = std::string(error.substr(0, 500));
+        database_.execute(std::format(
+            "UPDATE exchange_economy_transfers SET status='FAILED',attempt_count=attempt_count+1,last_error={},"
+            "completed_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+            database_.quote(safe_error), transfer_id));
+    }
+    const auto result = lockedBalance(player_uuid);
+    transaction.commit();
+    return result;
+}
+
+void ExchangeService::blockEconomyTransfer(const Id transfer_id, const std::string_view error) {
+    const auto safe_error = std::string(error.substr(0, 500));
+    database_.execute(std::format(
+        "UPDATE exchange_economy_transfers SET status='BLOCKED',attempt_count=attempt_count+1,last_error={} "
+        "WHERE id={} AND status='PREPARED'",
+        database_.quote(safe_error), transfer_id));
+    if (database_.affectedRows() != 1) {
+        throw std::runtime_error("prepared economy transfer does not exist");
+    }
+}
+
+int ExchangeService::pendingEconomyTransferCount() {
+    const auto rows = database_.query(
+        "SELECT COUNT(*) FROM exchange_economy_transfers "
+        "WHERE status IN ('PREPARED','EXTERNAL_APPLIED','BLOCKED')");
+    return rows.empty() ? 0 : cellInt(rows.front(), 0);
+}
+
+Cents ExchangeService::economyBackingDeficit() {
+    const auto rows = database_.query(
+        "SELECT "
+        "(SELECT COALESCE(SUM(balance_cents),0) FROM exchange_accounts)+"
+        "(SELECT COALESCE(SUM(reserved_cents),0) FROM exchange_orders "
+        " WHERE status IN ('OPEN','PARTIAL'))+"
+        "(SELECT COALESCE(SUM(amount_cents),0) FROM exchange_economy_transfers "
+        " WHERE direction='WITHDRAW' AND status IN ('PREPARED','BLOCKED'))-"
+        "(SELECT COALESCE(SUM(amount_cents),0) FROM exchange_economy_transfers "
+        " WHERE direction='DEPOSIT' AND status IN ('EXTERNAL_APPLIED','COMPLETED'))+"
+        "(SELECT COALESCE(SUM(amount_cents),0) FROM exchange_economy_transfers "
+        " WHERE direction='WITHDRAW' AND status IN ('EXTERNAL_APPLIED','COMPLETED'))");
+    return rows.empty() ? 0 : cellInt64(rows.front(), 0);
 }
 
 Market ExchangeService::marketFromRow(const QueryRow &row) {
@@ -1013,6 +1224,23 @@ Market ExchangeService::marketFromRow(const QueryRow &row) {
     result.item = {cellString(row, 9), cellInt(row, 10), bytesFromCell(row, 11), cellString(row, 12)};
     result.active = cellInt(row, 13) != 0;
     result.created_by = cellString(row, 14);
+    return result;
+}
+
+EconomyTransfer ExchangeService::economyTransferFromRow(const QueryRow &row) {
+    EconomyTransfer result;
+    result.id = static_cast<Id>(cellInt64(row, 0));
+    result.operation_key = cellString(row, 1);
+    result.player_uuid = cellString(row, 2);
+    result.player_name = cellString(row, 3);
+    result.direction =
+        cellString(row, 4) == "DEPOSIT" ? EconomyTransferDirection::Deposit : EconomyTransferDirection::Withdraw;
+    result.amount_cents = cellInt64(row, 5);
+    result.amount_units = cellInt64(row, 6);
+    result.status = economyTransferStatus(cellString(row, 7));
+    result.external_balance_units = optionalInt64(row, 8);
+    result.attempt_count = cellInt(row, 9);
+    result.last_error = cellString(row, 10);
     return result;
 }
 

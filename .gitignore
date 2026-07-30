@@ -12,4 +12,8 @@ cmake-build-*/
 compile_commands.json
 config.toml
 exchange-test.env
+__pycache__/
+*.pyc
+*.whl
+dist/
 

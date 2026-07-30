@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.6.1 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,7 @@ endif()
 
 set(ENDSTONE_VERSION "0.11.6" CACHE STRING "Exact Endstone release to target")
 option(EXCHANGE_BUILD_TESTS "Build the exchange test executable" ON)
+option(EXCHANGE_BUILD_E2E_DRIVER "Build the isolated Endstone event E2E driver" OFF)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -43,6 +44,7 @@ set(EXCHANGE_CORE_SOURCES
     src/localization.cpp
     src/market_display.cpp
     src/trade_form.cpp
+    src/umoney_gateway.cpp
 )
 
 endstone_add_plugin(exchange
@@ -73,10 +75,16 @@ if(EXCHANGE_BUILD_TESTS)
         include
         ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
-    target_link_libraries(exchange_tests PRIVATE endstone::endstone PkgConfig::MARIADB)
+    target_link_libraries(exchange_tests PRIVATE endstone::endstone PkgConfig::MARIADB Threads::Threads)
     target_compile_options(exchange_tests PRIVATE -Wall -Wextra -Wpedantic)
     if(UNIX AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         target_link_libraries(exchange_tests PRIVATE -static-libgcc -static-libstdc++ libc++.a libc++abi.a)
     endif()
     add_test(NAME exchange_tests COMMAND exchange_tests)
+endif()
+
+if(EXCHANGE_BUILD_E2E_DRIVER)
+    endstone_add_plugin(exchange_event_e2e tests/e2e/endstone_event_driver.cpp)
+    target_compile_options(exchange_event_e2e PRIVATE -Wall -Wextra -Wpedantic)
+    set_target_properties(exchange_event_e2e PROPERTIES SKIP_BUILD_RPATH TRUE)
 endif()

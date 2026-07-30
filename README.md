@@ -1,6 +1,6 @@
 # Endstone Exchange
 
-一个面向 Endstone 的 C++ 物品交易插件。管理员用名为 `exchanger` 的木棍把世界中的方块或实体设为交易点，玩家直接右击目标即可查看价格并交易。当前插件版本为 **1.6.1**，锁定 **Endstone v0.11.6 / BDS 1.26.33**。
+一个面向 Endstone 的 C++ 物品交易插件。管理员用名为 `exchanger` 的木棍把世界中的方块或实体设为交易点，玩家直接右击目标即可查看价格并交易。当前插件版本为 **1.7.0**，锁定 **Endstone v0.11.6 / BDS 1.26.33.1**。
 
 ## 功能
 
@@ -23,6 +23,7 @@
 - 交易界面只显示真正需要匹配的特殊条件，例如非零数据值、自定义名称、说明、附魔名称和等级、非零耐久损耗、铁砧修复代价以及其他特殊属性；数据值 `0`、无名称、无说明、无附魔、零损耗等默认状态不再显示。出售失败时复用同一份清单，完整 NBT 精确匹配规则保持不变。
 - 购买物品的领取和出售物品的暂存均使用可恢复的两阶段状态机，服务器中断后通过隐藏 NBT 标记继续或回滚。
 - 余额变动写入不可变账本，可校验账本总和与账户余额。
+- 可选接入 [UMoney](https://github.com/U-Blocks/UMoney)：玩家用 `/exchange deposit` 和 `/exchange withdraw` 在 UMoney 与交易余额之间转账。MySQL 转账状态、桥接 SQLite 幂等日志和 UMoney 文件刷盘屏障共同保证超时、重试、进程强杀与重启恢复不会重复扣款。
 - 悬浮交易提示使用异步批量快照，查询量不再按 `3 × 交易点数` 增长；插件只在目标区块已加载且经过 20 tick 实体恢复期后才补建载体，并在区块加载、跨区块移动和玩家重进后分阶段补发显示数据。
 
 ## Endstone API 可行性
@@ -43,9 +44,11 @@ sudo apt-get install cmake ninja-build pkg-config libc++-20-dev libc++abi-20-dev
 cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-20 -DEXCHANGE_BUILD_TESTS=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
+python3 -m unittest discover -s tests/python -v
+python3 -m pip wheel --no-deps ./python/umoney_bridge --wheel-dir build/bridge-dist
 ```
 
-CMake 会固定获取 Endstone `v0.11.6`。产物为 `build/endstone_exchange.so`。
+CMake 会固定获取 Endstone `v0.11.6`。产物为 `build/endstone_exchange.so`；可选 UMoney 桥接包位于 `build/bridge-dist/`。
 
 若要运行 MySQL 集成测试，先创建专用测试库，并让测试读取一个权限为 `600` 的本地插件配置文件：
 
@@ -78,6 +81,18 @@ ctest --test-dir build --output-on-failure
 
 配置文件应只允许服务账号读取，例如 `chmod 600 plugins/exchange/config.toml`。
 
+### UMoney 模式
+
+1. 安装 UMoney 的正式 wheel，以及本项目构建出的 `endstone_exchange_umoney_bridge-1.0.0-py3-none-any.whl`。
+2. 先启动一次桥接插件，让它生成 `plugins/exchange_umoney_bridge/config.json` 和随机令牌。
+3. 把同一个令牌填入 Exchange 的 `economy.bridge_token`，将 `economy.provider` 改为 `"umoney"`，并把 `market.initial_balance` 设为 `0`。
+4. 保持桥接地址为回环地址。默认 `127.0.0.1:8765` 不对外提供服务；两个配置文件都应设为 `600`。
+5. 重启后执行 `exchange status`，资金网关应显示 `umoney`，未完成转账与工作队列均应为 `0`。
+
+`economy.unit_cents` 定义一个 UMoney 整数单位对应多少交易分，默认 `100`，即 `1 UMoney = 1.00` 交易余额。已经进入队列的转账会同时固化 UMoney 单位数和交易分值，后续修改换算比例不会改变历史转账。桥接插件只通过 UMoney 的公开 `api_get_player_money` 与 `api_change_player_money` 接口操作余额，并把调用调度回 Endstone 主线程。
+
+UMoney 模式会核对“账户余额 + 未完成买单暂存 + 待处理提现”与历史净充值。若从旧版内部经济直接切换且仍有未背书余额或买单，插件会拒绝启动，避免把旧余额铸造成 UMoney；应先在备份上清算、重置或完成有实际 UMoney 储备的迁移。该模式下 `/exchange addbalance` 也会被禁用。
+
 模块边界、数据库不变量、升级路线和故障注入测试清单见 [docs/architecture.md](docs/architecture.md)。
 
 ## 使用
@@ -86,10 +101,12 @@ ctest --test-dir build --output-on-failure
 | --- | --- | --- |
 | `/exchange give [在线玩家]` | `exchange.admin` | 发放名为 `exchanger` 的木棍 |
 | `/exchange balance` | `exchange.use` | 查询交易余额 |
+| `/exchange deposit <正整数>` | `exchange.use` | 从 UMoney 扣款并充值交易余额 |
+| `/exchange withdraw <正整数>` | `exchange.use` | 从交易余额提现到 UMoney |
 | `/exchange orders` | `exchange.use` | 打开自己的未完成订单并可取消 |
 | `/exchange claim` | `exchange.use` | 领取因背包已满或离线而暂存的物品 |
 | `/exchange addbalance <在线玩家> <金额>` | `exchange.admin` | 调整余额，可传负数但不能扣成负余额 |
-| `/exchange status` | `exchange.use` | 检查数据库与活跃市场数 |
+| `/exchange status` | `exchange.use` | 检查数据库、活跃市场、资金网关和恢复队列 |
 
 `exchange.use` 默认所有玩家拥有；`exchange.admin` 默认仅 OP 拥有。
 

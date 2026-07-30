@@ -51,3 +51,9 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Test UMoney bridge
+        run: python3 -m unittest discover -s tests/python -v
+
+      - name: Build UMoney bridge wheel
+        run: python3 -m pip wheel --no-deps ./python/umoney_bridge --wheel-dir build/bridge-dist

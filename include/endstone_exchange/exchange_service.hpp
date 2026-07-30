@@ -46,12 +46,26 @@ class ExchangeService {
     [[nodiscard]] std::vector<SellEscrow> unfinishedSellEscrows(std::string_view player_uuid);
     [[nodiscard]] std::optional<SellEscrow> findSellEscrow(Id escrow_id, std::string_view player_uuid);
 
+    [[nodiscard]] EconomyTransfer prepareEconomyTransfer(std::string_view player_uuid, std::string_view player_name,
+                                                         EconomyTransferDirection direction, Cents amount_cents,
+                                                         std::int64_t amount_units);
+    [[nodiscard]] std::vector<EconomyTransfer> pendingEconomyTransfers(int limit = 16);
+    [[nodiscard]] std::optional<EconomyTransfer> findEconomyTransfer(Id transfer_id);
+    void recordEconomyTransferAttempt(Id transfer_id, std::string_view error);
+    void markEconomyTransferExternalApplied(Id transfer_id, std::int64_t external_balance_units);
+    [[nodiscard]] Cents completeEconomyTransfer(Id transfer_id);
+    [[nodiscard]] Cents failEconomyTransfer(Id transfer_id, std::string_view error);
+    void blockEconomyTransfer(Id transfer_id, std::string_view error);
+    [[nodiscard]] int pendingEconomyTransferCount();
+    [[nodiscard]] Cents economyBackingDeficit();
+
   private:
     Database &database_;
     Cents initial_balance_cents_;
     int max_order_quantity_;
 
     [[nodiscard]] static Market marketFromRow(const QueryRow &row);
+    [[nodiscard]] static EconomyTransfer economyTransferFromRow(const QueryRow &row);
     [[nodiscard]] Id lockActiveBook(Id market_id);
     [[nodiscard]] Cents lockedBalance(std::string_view player_uuid);
     void credit(std::string_view player_uuid, Cents amount, std::string_view reason,

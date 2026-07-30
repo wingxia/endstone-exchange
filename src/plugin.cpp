@@ -91,6 +91,17 @@ std::string friendlyItemName(const endstone::ItemStack &item) {
     return type;
 }
 
+std::optional<std::int64_t> positiveWholeNumber(const std::string_view value) {
+    std::int64_t result{};
+    const auto *begin = value.data();
+    const auto *end = value.data() + value.size();
+    const auto [parsed_end, error] = std::from_chars(begin, end, result);
+    if (error != std::errc{} || parsed_end != end || result <= 0) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 } // namespace
 
 void ExchangePlugin::onEnable() {
@@ -111,7 +122,19 @@ void ExchangePlugin::onEnable() {
         database_->migrate();
         service_ = std::make_unique<ExchangeService>(*database_, config_.market.initial_balance_cents,
                                                      config_.market.max_order_quantity);
+        if (config_.economy.usesUmoney()) {
+            const auto backing_deficit = service_->economyBackingDeficit();
+            if (backing_deficit > 0) {
+                throw std::runtime_error(std::format(
+                    "UMoney mode refused {} cents of unbacked legacy exchange value; "
+                    "migrate or reset existing balances and funded orders first",
+                    backing_deficit));
+            }
+        }
         hologram_snapshot_state_ = std::make_shared<HologramSnapshotState>();
+        if (config_.economy.usesUmoney()) {
+            economy_worker_ = std::make_unique<UmoneyTransferWorker>(config_.economy);
+        }
 
         // Bedrock marks interactions with an item that has no vanilla action as cancelled before
         // plugins see them. The exchanger is intentionally such an item, so these handlers must
@@ -132,16 +155,33 @@ void ExchangePlugin::onEnable() {
         restoreMarkets();
         refresh_task_ = getServer().getScheduler().runTaskTimer(
             *this, [this] { refreshHolograms(); }, 1, config_.market.hologram_refresh_ticks);
-        getLogger().info("Endstone Exchange {} enabled with {} active markets.", ENDSTONE_EXCHANGE_VERSION,
-                         markets_.size());
+        if (economy_worker_) {
+            economy_task_ = getServer().getScheduler().runTaskTimer(
+                *this, [this] { processEconomyTransfers(); }, 1, config_.economy.recovery_interval_ticks);
+            processEconomyTransfers();
+        }
+        getLogger().info("Endstone Exchange {} enabled with {} active markets (economy provider: {}).",
+                         ENDSTONE_EXCHANGE_VERSION, markets_.size(), config_.economy.provider);
     } catch (const std::exception &error) {
         ready_ = false;
+        if (economy_worker_) {
+            economy_worker_->stop();
+            economy_worker_.reset();
+        }
         getLogger().error("Exchange startup failed: {}", error.what());
     }
 }
 
 void ExchangePlugin::onDisable() {
     ready_ = false;
+    if (economy_task_) {
+        economy_task_->cancel();
+        economy_task_.reset();
+    }
+    if (economy_worker_) {
+        economy_worker_->stop();
+        economy_worker_.reset();
+    }
     if (hologram_snapshot_state_) {
         hologram_snapshot_state_->stopping = true;
         if (hologram_snapshot_state_->query_thread.joinable()) {
@@ -239,6 +279,44 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
                                   formatMoney(service_->balance(player->getUniqueId().str()))));
             return true;
         }
+        if (subcommand == "deposit" || subcommand == "withdraw") {
+            if (player == nullptr) {
+                sender.sendErrorMessage("{}", messageText(language, Message::EconomyPlayerOnly));
+                return true;
+            }
+            if (!economy_worker_) {
+                sender.sendErrorMessage("{}", messageText(language, Message::EconomyDisabled));
+                return true;
+            }
+            if (args.size() != 2) {
+                sender.sendErrorMessage("{}", messageText(language, Message::EconomyUsage));
+                return true;
+            }
+            const auto units = positiveWholeNumber(args[1]);
+            if (!units ||
+                *units > std::numeric_limits<Cents>::max() / config_.economy.unit_cents) {
+                throw UserError(tr(language, Message::EconomyAmountInvalid));
+            }
+            const auto amount_cents = *units * config_.economy.unit_cents;
+            service_->ensureAccount(player->getUniqueId().str(), player->getName());
+            if (subcommand == "withdraw" &&
+                service_->balance(player->getUniqueId().str()) < amount_cents) {
+                throw UserError(tr(language, Message::EconomyExchangeInsufficient));
+            }
+            const auto direction = subcommand == "deposit" ? EconomyTransferDirection::Deposit
+                                                            : EconomyTransferDirection::Withdraw;
+            const auto transfer =
+                service_->prepareEconomyTransfer(player->getUniqueId().str(), player->getName(), direction,
+                                                 amount_cents, *units);
+            queueEconomyTransfer(transfer);
+            sender.sendMessage(
+                "{}",
+                tr(language,
+                   direction == EconomyTransferDirection::Deposit ? Message::EconomyDepositQueued
+                                                                  : Message::EconomyWithdrawQueued,
+                   transfer.amount_units, transfer.id));
+            return true;
+        }
         if (subcommand == "orders") {
             if (player == nullptr) {
                 sender.sendErrorMessage("{}", messageText(language, Message::PlayerFormOnly));
@@ -257,6 +335,10 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
             return true;
         }
         if (subcommand == "addbalance") {
+            if (config_.economy.usesUmoney()) {
+                sender.sendErrorMessage("{}", messageText(language, Message::EconomyAdminBalanceDisabled));
+                return true;
+            }
             if (!sender.hasPermission("exchange.admin") || args.size() != 3) {
                 sender.sendErrorMessage("{}", messageText(language, Message::AddBalanceUsage));
                 return true;
@@ -291,6 +373,10 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
         if (subcommand == "status") {
             database_->ping();
             sender.sendMessage("{}", tr(language, Message::StatusOk, ENDSTONE_EXCHANGE_VERSION, markets_.size()));
+            sender.sendMessage(
+                "{}", tr(language, Message::EconomyStatus, config_.economy.provider,
+                         service_->pendingEconomyTransferCount(),
+                         economy_worker_ ? economy_worker_->outstandingCount() : 0));
             return true;
         }
         sender.sendErrorMessage("{}", messageText(language, Message::UnknownSubcommand));
@@ -299,6 +385,105 @@ bool ExchangePlugin::onCommand(endstone::CommandSender &sender, const endstone::
         getLogger().warning("Command failed: {}", error.what());
     }
     return true;
+}
+
+void ExchangePlugin::processEconomyTransfers() {
+    if (!ready_ || !service_ || !economy_worker_) {
+        return;
+    }
+
+    std::unordered_set<Id> retry_later;
+    for (const auto &result : economy_worker_->takeResults()) {
+        try {
+            const auto transfer = service_->findEconomyTransfer(result.transfer_id);
+            if (!transfer || transfer->status == EconomyTransferStatus::Completed ||
+                transfer->status == EconomyTransferStatus::Failed ||
+                transfer->status == EconomyTransferStatus::Blocked) {
+                continue;
+            }
+            if (result.success) {
+                service_->markEconomyTransferExternalApplied(result.transfer_id,
+                                                             result.external_balance_units);
+                const auto exchange_balance = service_->completeEconomyTransfer(result.transfer_id);
+                notifyEconomyTransfer(*transfer, exchange_balance, true);
+                continue;
+            }
+
+            const auto error = result.error.empty() ? "UMoney bridge operation failed" : result.error;
+            if (result.applied || result.error_code == "manual_reconciliation_required" ||
+                result.error_code == "idempotency_conflict") {
+                service_->blockEconomyTransfer(result.transfer_id, error);
+                notifyEconomyTransfer(*transfer, service_->balance(transfer->player_uuid), false, "blocked",
+                                      error);
+                getLogger().error("UMoney transfer #{} requires manual reconciliation: {}",
+                                  result.transfer_id, error);
+            } else if (!result.retryable) {
+                const auto exchange_balance = service_->failEconomyTransfer(result.transfer_id, error);
+                notifyEconomyTransfer(*transfer, exchange_balance, false, result.error_code, error);
+            } else {
+                service_->recordEconomyTransferAttempt(result.transfer_id, error);
+                retry_later.insert(result.transfer_id);
+                getLogger().warning("UMoney transfer #{} will be retried: {}", result.transfer_id, error);
+            }
+        } catch (const std::exception &error) {
+            retry_later.insert(result.transfer_id);
+            getLogger().error("Could not settle UMoney transfer #{}: {}", result.transfer_id, error.what());
+        }
+    }
+
+    for (const auto &transfer : service_->pendingEconomyTransfers(100)) {
+        try {
+            if (transfer.status == EconomyTransferStatus::ExternalApplied) {
+                const auto exchange_balance = service_->completeEconomyTransfer(transfer.id);
+                notifyEconomyTransfer(transfer, exchange_balance, true);
+            } else if (!retry_later.contains(transfer.id)) {
+                queueEconomyTransfer(transfer);
+            }
+        } catch (const std::exception &error) {
+            getLogger().error("Could not recover UMoney transfer #{}: {}", transfer.id, error.what());
+        }
+    }
+}
+
+void ExchangePlugin::queueEconomyTransfer(const EconomyTransfer &transfer) {
+    if (!economy_worker_ || transfer.status != EconomyTransferStatus::Prepared) {
+        return;
+    }
+    static_cast<void>(economy_worker_->submit(
+        UmoneyTransferRequest{transfer.id, transfer.operation_key, transfer.player_name,
+                              transfer.direction, transfer.amount_units}));
+}
+
+void ExchangePlugin::notifyEconomyTransfer(const EconomyTransfer &transfer, const Cents exchange_balance,
+                                           const bool completed, const std::string_view error_code,
+                                           const std::string_view error) {
+    auto *player = getServer().getPlayer(transfer.player_name);
+    if (player == nullptr) {
+        return;
+    }
+    const auto language = languageFor(*player);
+    if (completed) {
+        player->sendMessage(
+            "{}",
+            tr(language,
+               transfer.direction == EconomyTransferDirection::Deposit ? Message::EconomyDepositCompleted
+                                                                       : Message::EconomyWithdrawCompleted,
+               transfer.id, transfer.amount_units, formatMoney(exchange_balance)));
+        return;
+    }
+    if (error_code == "blocked") {
+        player->sendErrorMessage("{}", tr(language, Message::EconomyTransferBlocked, transfer.id, error));
+        return;
+    }
+    std::string reason;
+    if (error_code == "insufficient_funds") {
+        reason = messageText(language, Message::EconomyInsufficient);
+    } else if (error_code == "player_not_found") {
+        reason = messageText(language, Message::EconomyPlayerMissing);
+    } else {
+        reason = error.empty() ? tr(language, Message::UnexpectedError) : std::string(error);
+    }
+    player->sendErrorMessage("{}", tr(language, Message::EconomyTransferFailed, transfer.id, reason));
 }
 
 void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
@@ -2085,6 +2270,7 @@ ENDSTONE_PLUGIN("exchange", ENDSTONE_EXCHANGE_VERSION, exchange::ExchangePlugin)
     command("exchange")
         .description("Open item trading and manage trade points")
         .usages("/exchange", "/exchange give [player: str]", "/exchange balance", "/exchange orders", "/exchange claim",
+                "/exchange deposit <amount: int>", "/exchange withdraw <amount: int>",
                 "/exchange addbalance <player: str> <amount: float>", "/exchange status")
         .permissions("exchange.use");
 
