@@ -16,6 +16,7 @@ namespace {
 constexpr std::string_view DeliveryClaimTag = "__endstone_exchange_claim";
 constexpr std::string_view SellItemTag = "__endstone_exchange_sell_item";
 constexpr std::string_view SellReceiptTag = "__endstone_exchange_sell_receipt";
+constexpr std::string_view FrameSaleTag = "__endstone_exchange_frame_sale";
 constexpr int OffHandSlot = -1;
 
 std::optional<Id> markerId(const endstone::CompoundTag &nbt, const std::string_view marker) {
@@ -171,6 +172,39 @@ std::optional<Id> sellReceiptEscrowId(const endstone::ItemStack &item) {
 bool isInternalEscrowItem(const endstone::ItemStack &item) {
     return deliveryClaimId(item).has_value() || sellItemEscrowId(item).has_value() ||
            sellReceiptEscrowId(item).has_value();
+}
+
+std::optional<Id> frameSaleItemId(const endstone::ItemStack &item) {
+    return markerId(item, FrameSaleTag);
+}
+
+std::optional<Id> frameSaleItemId(const endstone::CompoundTag &nbt) {
+    return markerId(nbt, FrameSaleTag);
+}
+
+void tagFrameSaleItem(endstone::ItemStack &item, const Id listing_id) {
+    setMarker(item, FrameSaleTag, listing_id);
+}
+
+void tagFrameSaleItem(endstone::CompoundTag &nbt, const Id listing_id) {
+    nbt.insert_or_assign(std::string(FrameSaleTag), endstone::StringTag(std::to_string(listing_id)));
+}
+
+bool clearFrameSaleItemTag(endstone::ItemStack &item, const Id listing_id) {
+    auto nbt = item.getNbt();
+    if (!clearFrameSaleItemTag(nbt, listing_id)) {
+        return false;
+    }
+    item.setNbt(nbt);
+    return !frameSaleItemId(item).has_value();
+}
+
+bool clearFrameSaleItemTag(endstone::CompoundTag &nbt, const Id listing_id) {
+    if (frameSaleItemId(nbt) != listing_id) {
+        return false;
+    }
+    nbt.erase(std::string(FrameSaleTag));
+    return !frameSaleItemId(nbt).has_value();
 }
 
 InternalEscrowMarkers internalEscrowMarkers(const endstone::PlayerInventory &inventory) {

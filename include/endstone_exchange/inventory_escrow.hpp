@@ -39,6 +39,13 @@ void removeDeliveryClaimItems(endstone::PlayerInventory &inventory, Id claim_id)
 [[nodiscard]] std::optional<Id> sellItemEscrowId(const endstone::ItemStack &item);
 [[nodiscard]] std::optional<Id> sellReceiptEscrowId(const endstone::ItemStack &item);
 [[nodiscard]] bool isInternalEscrowItem(const endstone::ItemStack &item);
+
+[[nodiscard]] std::optional<Id> frameSaleItemId(const endstone::ItemStack &item);
+[[nodiscard]] std::optional<Id> frameSaleItemId(const endstone::CompoundTag &nbt);
+void tagFrameSaleItem(endstone::ItemStack &item, Id listing_id);
+void tagFrameSaleItem(endstone::CompoundTag &nbt, Id listing_id);
+[[nodiscard]] bool clearFrameSaleItemTag(endstone::ItemStack &item, Id listing_id);
+[[nodiscard]] bool clearFrameSaleItemTag(endstone::CompoundTag &nbt, Id listing_id);
 [[nodiscard]] InternalEscrowMarkers internalEscrowMarkers(const endstone::PlayerInventory &inventory);
 [[nodiscard]] int sellableItemCount(const endstone::PlayerInventory &inventory, const ItemPrototype &prototype);
 [[nodiscard]] TaggedSellItems tagSellItems(endstone::PlayerInventory &inventory, const ItemPrototype &prototype,

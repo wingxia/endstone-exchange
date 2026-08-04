@@ -31,6 +31,8 @@ The Endstone adapter may call the domain service, but the service never calls En
 - `exchange_sell_escrows` moves whole matching stacks through `PREPARED`, `TAGGED`, `ORDERED` and `CLEANED`. Temporary barrier receipts make an interrupted inventory removal distinguishable from an order that was never funded.
 - `exchange_balance_ledger` is append-only. For every player, `SUM(delta_cents)` must equal `exchange_accounts.balance_cents`.
 - `exchange_economy_transfers` is the durable cross-system saga. A withdrawal reserves internal balance before UMoney credit; a deposit credits internal balance only after the UMoney debit is known applied. `operation_key` is immutable and unique.
+- `exchange_frame_listings` stores immutable item snapshots and moves one-price item-frame sales through `ACTIVE`, `PAID`, `DROPPED`, and `CLAIMED`; cancellation is only legal before payment. `exchange_frame_listing_bindings` is the unique mutable guard for a frame until its marked drop is picked up.
+- A frame purchase locks the listing and both accounts in one MySQL transaction, writes a balanced `FRAME_PURCHASE` / `FRAME_SALE` ledger pair, then revalidates and clears the physical frame. Structure capture re-saves and retries up to three times when the LevelDB record is not visible yet. Clearing recreates the frame from its original `BlockData` without physics, verifies the empty BlockActor, and only then spawns the drop; this avoids treating item frames as command containers. The dropped stack carries a hidden listing marker and unlimited lifetime so restart recovery can adopt an existing drop instead of duplicating it.
 - The local UMoney bridge records `PREPARED` before calling UMoney and `COMPLETED` only after the UMoney money file passes an `fsync` durability barrier. A retry observes the expected before/after balance and never blindly applies the same delta twice.
 - A network timeout remains retryable because the bridge idempotency key can safely reveal the result. A conflicting observed balance is moved to `BLOCKED` for manual reconciliation instead of guessing, refunding, or applying another delta.
 - UMoney mode requires zero initial balance, disables administrative `addbalance`, and refuses startup when account balances, funded buy orders and pending withdrawals exceed the net externally applied UMoney deposits. This prevents legacy or operator-minted internal value from becoming withdrawable UMoney.
@@ -48,6 +50,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 | 6 | Paused markets whose funded order books survive a manual close and resume safely |
 | 7 | Shared item books: independent physical locations with one exact-item order book |
 | 8 | Crash-recoverable UMoney deposits and withdrawals with persisted external units |
+| 9 | Public one-price item-frame listings with atomic payment and marked-drop recovery |
 
 The embedded runner checks `exchange_schema_versions` and makes each upgrade retry-safe. Files under `migrations/` are the reviewable SQL equivalents; the plugin remains self-contained at deployment time.
 
@@ -82,5 +85,6 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 - Process termination after UMoney persistence but before the bridge reply, and after bridge completion but before MySQL completion; each restart must settle exactly once.
 - UMoney file, bridge SQLite journal, exchange ledger, account balance and transfer table reconciliation after every injected crash.
 - Full inventory, non-stackable items, custom NBT, empty and filled item frames.
+- Public `price_tag` listing, repricing, cancellation, non-owner rejection, OP override, left-click confirmation, insufficient balance, duplicate confirmation, competing buyers, explosion/break protection, marked drop pickup, and termination before/after frame clearing and drop creation.
 - Database timeout/reconnect, server restart, target chunk unload/reload, player reconnect, duplicate-label cleanup, stable label position and actor removal.
 - Ledger reconciliation after every scenario.

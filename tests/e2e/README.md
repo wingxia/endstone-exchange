@@ -12,8 +12,8 @@ on a production server.
 - `endstone_driver/` builds a temporary Python plugin whose `exchangee2e`
   command dispatches a small allowlist of Exchange commands as an online player.
 - `endstone_event_driver.cpp` builds a temporary C++ plugin whose
-  `exchangeevente2e` command raises a real `PlayerInteractEvent` for a selected
-  block.
+  `exchangeevente2e` command raises a real left/right `PlayerInteractEvent` for
+  a selected block and can supply synthetic `exchanger` or `price_tag` sticks.
 
 The drivers assume an isolated offline-mode server, a disposable database, and a
 dedicated `screen` session. Back up the test server before fault injection.

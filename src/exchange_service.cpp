@@ -22,6 +22,13 @@ std::optional<std::int64_t> optionalInt64(const QueryRow &row, const std::size_t
     return cellInt64(row, index);
 }
 
+std::optional<std::string> optionalString(const QueryRow &row, const std::size_t index) {
+    if (index >= row.size() || !row[index].has_value()) {
+        return std::nullopt;
+    }
+    return cellString(row, index);
+}
+
 std::string orderStatus(const int remaining, const int filled) {
     if (remaining == 0) {
         return "FILLED";
@@ -128,6 +135,30 @@ EconomyTransferStatus economyTransferStatus(const std::string_view status) {
     }
     throw std::runtime_error("economy transfer has an unknown status");
 }
+
+FrameListingStatus frameListingStatus(const std::string_view status) {
+    if (status == "ACTIVE") {
+        return FrameListingStatus::Active;
+    }
+    if (status == "PAID") {
+        return FrameListingStatus::Paid;
+    }
+    if (status == "DROPPED") {
+        return FrameListingStatus::Dropped;
+    }
+    if (status == "CLAIMED") {
+        return FrameListingStatus::Claimed;
+    }
+    if (status == "CANCELED") {
+        return FrameListingStatus::Canceled;
+    }
+    throw std::runtime_error("frame listing has an unknown status");
+}
+
+constexpr std::string_view FrameListingColumns =
+    "l.id,l.target_key,l.dimension_name,l.block_x,l.block_y,l.block_z,"
+    "l.seller_uuid,l.seller_name,l.price_cents,l.item_type,l.item_data,l.item_nbt,l.item_name,"
+    "l.status,l.buyer_uuid,l.buyer_name";
 
 } // namespace
 
@@ -1204,6 +1235,216 @@ Cents ExchangeService::economyBackingDeficit() {
     return rows.empty() ? 0 : cellInt64(rows.front(), 0);
 }
 
+FrameListing ExchangeService::upsertFrameListing(const FrameListing &listing, const bool administrator) {
+    if (listing.target_key.empty() || listing.dimension_name.empty() || listing.seller_uuid.empty() ||
+        listing.seller_name.empty() || listing.price_cents <= 0 || listing.item.type.empty()) {
+        throw std::runtime_error("frame listing is incomplete");
+    }
+    ensureAccount(listing.seller_uuid, listing.seller_name);
+
+    Transaction transaction(database_);
+    const auto existing = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listing_bindings b "
+        "JOIN exchange_frame_listings l ON l.id=b.listing_id WHERE b.target_key={} FOR UPDATE",
+        FrameListingColumns, database_.quote(listing.target_key)));
+    if (!existing.empty()) {
+        const auto current = frameListingFromRow(existing.front());
+        if (current.status != FrameListingStatus::Active) {
+            throw std::runtime_error("frame listing is already being settled");
+        }
+        if (!administrator && current.seller_uuid != listing.seller_uuid) {
+            throw std::runtime_error("frame listing belongs to another seller");
+        }
+        database_.execute(std::format(
+            "UPDATE exchange_frame_listings SET status='CANCELED',canceled_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+            current.id));
+        database_.execute(
+            std::format("DELETE FROM exchange_frame_listing_bindings WHERE listing_id={}", current.id));
+    }
+
+    database_.execute(std::format(
+        "INSERT INTO exchange_frame_listings("
+        "target_key,dimension_name,block_x,block_y,block_z,seller_uuid,seller_name,price_cents,"
+        "item_type,item_data,item_nbt,item_name) VALUES ({},{},{},{},{},{},{},{},{},{},{},{})",
+        database_.quote(listing.target_key), database_.quote(listing.dimension_name), listing.block_x,
+        listing.block_y, listing.block_z, database_.quote(listing.seller_uuid), database_.quote(listing.seller_name),
+        listing.price_cents, database_.quote(listing.item.type), listing.item.data,
+        Database::hexLiteral(listing.item.nbt), database_.quote(listing.item.name)));
+    auto result = listing;
+    result.id = database_.lastInsertId();
+    result.status = FrameListingStatus::Active;
+    result.buyer_uuid.reset();
+    result.buyer_name.reset();
+    database_.execute(std::format(
+        "INSERT INTO exchange_frame_listing_bindings(target_key,listing_id) VALUES ({},{})",
+        database_.quote(result.target_key), result.id));
+    transaction.commit();
+    return result;
+}
+
+std::optional<FrameListing> ExchangeService::findBoundFrameListing(const std::string_view target_key) {
+    const auto rows = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listing_bindings b "
+        "JOIN exchange_frame_listings l ON l.id=b.listing_id WHERE b.target_key={}",
+        FrameListingColumns, database_.quote(target_key)));
+    return rows.empty() ? std::nullopt : std::optional<FrameListing>(frameListingFromRow(rows.front()));
+}
+
+std::optional<FrameListing> ExchangeService::findFrameListing(const Id listing_id) {
+    const auto rows = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listings l WHERE l.id={}", FrameListingColumns, listing_id));
+    return rows.empty() ? std::nullopt : std::optional<FrameListing>(frameListingFromRow(rows.front()));
+}
+
+std::vector<FrameListing> ExchangeService::boundFrameListings() {
+    const auto rows = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listing_bindings b "
+        "JOIN exchange_frame_listings l ON l.id=b.listing_id ORDER BY l.id",
+        FrameListingColumns));
+    std::vector<FrameListing> result;
+    result.reserve(rows.size());
+    for (const auto &row : rows) {
+        result.push_back(frameListingFromRow(row));
+    }
+    return result;
+}
+
+std::vector<FrameListing> ExchangeService::unsettledFrameListings() {
+    const auto rows = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listings l WHERE l.status IN ('PAID','DROPPED') ORDER BY l.id",
+        FrameListingColumns));
+    std::vector<FrameListing> result;
+    result.reserve(rows.size());
+    for (const auto &row : rows) {
+        result.push_back(frameListingFromRow(row));
+    }
+    return result;
+}
+
+void ExchangeService::cancelFrameListing(const Id listing_id, const std::string_view requester_uuid,
+                                         const bool administrator) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(std::format(
+        "SELECT seller_uuid,status FROM exchange_frame_listings WHERE id={} FOR UPDATE", listing_id));
+    if (rows.empty()) {
+        throw std::runtime_error("frame listing does not exist");
+    }
+    const auto seller_uuid = cellString(rows.front(), 0);
+    const auto status = frameListingStatus(cellString(rows.front(), 1));
+    if (status == FrameListingStatus::Canceled) {
+        transaction.commit();
+        return;
+    }
+    if (status != FrameListingStatus::Active) {
+        throw std::runtime_error("paid frame listing cannot be canceled");
+    }
+    if (!administrator && seller_uuid != requester_uuid) {
+        throw std::runtime_error("frame listing belongs to another seller");
+    }
+    database_.execute(std::format(
+        "UPDATE exchange_frame_listings SET status='CANCELED',canceled_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+        listing_id));
+    database_.execute(
+        std::format("DELETE FROM exchange_frame_listing_bindings WHERE listing_id={}", listing_id));
+    transaction.commit();
+}
+
+FramePurchaseResult ExchangeService::purchaseFrameListing(const Id listing_id,
+                                                          const std::string_view buyer_uuid,
+                                                          const std::string_view buyer_name,
+                                                          const Cents expected_price_cents) {
+    if (buyer_uuid.empty() || buyer_name.empty() || expected_price_cents <= 0) {
+        throw std::runtime_error("frame purchase identity is incomplete");
+    }
+    ensureAccount(buyer_uuid, buyer_name);
+
+    Transaction transaction(database_);
+    const auto rows = database_.query(std::format(
+        "SELECT {} FROM exchange_frame_listings l WHERE l.id={} FOR UPDATE", FrameListingColumns, listing_id));
+    if (rows.empty()) {
+        throw std::runtime_error("frame listing does not exist");
+    }
+    auto listing = frameListingFromRow(rows.front());
+    if (listing.status != FrameListingStatus::Active) {
+        throw std::runtime_error("frame listing is no longer available");
+    }
+    if (listing.price_cents != expected_price_cents) {
+        throw std::runtime_error("frame listing price changed");
+    }
+    if (listing.seller_uuid == buyer_uuid) {
+        throw std::runtime_error("seller cannot buy their own frame listing");
+    }
+    const auto binding = database_.query(std::format(
+        "SELECT target_key FROM exchange_frame_listing_bindings WHERE listing_id={} FOR UPDATE", listing_id));
+    if (binding.empty() || cellString(binding.front(), 0) != listing.target_key) {
+        throw std::runtime_error("frame listing is no longer bound");
+    }
+
+    const auto accounts = database_.query(std::format(
+        "SELECT player_uuid FROM exchange_accounts WHERE player_uuid IN ({},{}) ORDER BY player_uuid FOR UPDATE",
+        database_.quote(buyer_uuid), database_.quote(listing.seller_uuid)));
+    if (accounts.size() != 2) {
+        throw std::runtime_error("frame purchase account is missing");
+    }
+
+    debit(buyer_uuid, listing.price_cents, "FRAME_PURCHASE", "FRAME_LISTING", listing.id);
+    credit(listing.seller_uuid, listing.price_cents, "FRAME_SALE", "FRAME_LISTING", listing.id);
+    database_.execute(std::format(
+        "UPDATE exchange_frame_listings SET status='PAID',buyer_uuid={},buyer_name={},"
+        "paid_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+        database_.quote(buyer_uuid), database_.quote(buyer_name), listing.id));
+    listing.status = FrameListingStatus::Paid;
+    listing.buyer_uuid = std::string(buyer_uuid);
+    listing.buyer_name = std::string(buyer_name);
+    FramePurchaseResult result{listing, lockedBalance(buyer_uuid), lockedBalance(listing.seller_uuid)};
+    transaction.commit();
+    return result;
+}
+
+void ExchangeService::markFrameListingDropped(const Id listing_id) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(
+        std::format("SELECT status FROM exchange_frame_listings WHERE id={} FOR UPDATE", listing_id));
+    if (rows.empty()) {
+        throw std::runtime_error("frame listing does not exist");
+    }
+    const auto status = frameListingStatus(cellString(rows.front(), 0));
+    if (status == FrameListingStatus::Dropped || status == FrameListingStatus::Claimed) {
+        transaction.commit();
+        return;
+    }
+    if (status != FrameListingStatus::Paid) {
+        throw std::runtime_error("unpaid frame listing cannot be dropped");
+    }
+    database_.execute(std::format(
+        "UPDATE exchange_frame_listings SET status='DROPPED',dropped_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+        listing_id));
+    transaction.commit();
+}
+
+void ExchangeService::completeFrameListingPickup(const Id listing_id) {
+    Transaction transaction(database_);
+    const auto rows = database_.query(
+        std::format("SELECT status FROM exchange_frame_listings WHERE id={} FOR UPDATE", listing_id));
+    if (rows.empty()) {
+        throw std::runtime_error("frame listing does not exist");
+    }
+    const auto status = frameListingStatus(cellString(rows.front(), 0));
+    if (status == FrameListingStatus::Claimed) {
+        transaction.commit();
+        return;
+    }
+    if (status != FrameListingStatus::Paid && status != FrameListingStatus::Dropped) {
+        throw std::runtime_error("frame listing is not awaiting pickup");
+    }
+    database_.execute(std::format(
+        "UPDATE exchange_frame_listings SET status='CLAIMED',claimed_at=CURRENT_TIMESTAMP(6) WHERE id={}",
+        listing_id));
+    database_.execute(
+        std::format("DELETE FROM exchange_frame_listing_bindings WHERE listing_id={}", listing_id));
+    transaction.commit();
+}
+
 Market ExchangeService::marketFromRow(const QueryRow &row) {
     Market result;
     result.id = static_cast<Id>(cellInt64(row, 0));
@@ -1241,6 +1482,24 @@ EconomyTransfer ExchangeService::economyTransferFromRow(const QueryRow &row) {
     result.external_balance_units = optionalInt64(row, 8);
     result.attempt_count = cellInt(row, 9);
     result.last_error = cellString(row, 10);
+    return result;
+}
+
+FrameListing ExchangeService::frameListingFromRow(const QueryRow &row) {
+    FrameListing result;
+    result.id = static_cast<Id>(cellInt64(row, 0));
+    result.target_key = cellString(row, 1);
+    result.dimension_name = cellString(row, 2);
+    result.block_x = cellInt(row, 3);
+    result.block_y = cellInt(row, 4);
+    result.block_z = cellInt(row, 5);
+    result.seller_uuid = cellString(row, 6);
+    result.seller_name = cellString(row, 7);
+    result.price_cents = cellInt64(row, 8);
+    result.item = {cellString(row, 9), cellInt(row, 10), bytesFromCell(row, 11), cellString(row, 12)};
+    result.status = frameListingStatus(cellString(row, 13));
+    result.buyer_uuid = optionalString(row, 14);
+    result.buyer_name = optionalString(row, 15);
     return result;
 }
 

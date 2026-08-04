@@ -11,6 +11,8 @@
 
 #include <endstone/endstone.hpp>
 
+#include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,6 +24,14 @@ namespace exchange {
 
 struct HologramSnapshotState;
 
+struct FrameAddress {
+    std::string target_key;
+    std::string dimension_name;
+    int x{0};
+    int y{0};
+    int z{0};
+};
+
 class ExchangePlugin : public endstone::Plugin {
   public:
     void onEnable() override;
@@ -32,6 +42,9 @@ class ExchangePlugin : public endstone::Plugin {
     void onPlayerInteract(endstone::PlayerInteractEvent &event);
     void onPlayerInteractActor(endstone::PlayerInteractActorEvent &event);
     void onBlockBreak(endstone::BlockBreakEvent &event);
+    void onListedFrameBreak(endstone::BlockBreakEvent &event);
+    void onActorExplode(endstone::ActorExplodeEvent &event);
+    void onBlockExplode(endstone::BlockExplodeEvent &event);
     void onActorDamage(endstone::ActorDamageEvent &event);
     void onActorRemove(endstone::ActorRemoveEvent &event);
     void onPlayerJoin(endstone::PlayerJoinEvent &event);
@@ -40,6 +53,7 @@ class ExchangePlugin : public endstone::Plugin {
     void onChunkLoad(endstone::ChunkLoadEvent &event);
     void onChunkUnload(endstone::ChunkUnloadEvent &event);
     void onPlayerDropItem(endstone::PlayerDropItemEvent &event);
+    void onPlayerPickupItem(endstone::PlayerPickupItemEvent &event);
 
   private:
     Config config_;
@@ -53,18 +67,23 @@ class ExchangePlugin : public endstone::Plugin {
     std::unordered_set<std::string> loaded_chunks_;
     std::unordered_set<std::string> hologram_spawn_ready_chunks_;
     std::unordered_map<std::string, std::string> pending_frame_captures_;
+    std::unordered_map<std::string, Id> frame_listing_index_;
+    std::unordered_set<Id> pending_frame_settlements_;
     InteractionGate interaction_gate_{std::chrono::milliseconds(750)};
     std::unordered_set<std::string> open_trade_forms_;
+    std::unordered_set<std::string> open_frame_forms_;
     std::unordered_set<std::string> pending_join_hologram_recreates_;
     std::unordered_map<std::string, std::unordered_set<std::string>> join_loaded_chunks_;
     std::unordered_set<Id> pending_hologram_recreates_;
     std::shared_ptr<endstone::Task> refresh_task_;
     std::shared_ptr<endstone::Task> economy_task_;
+    std::shared_ptr<endstone::Task> frame_recovery_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
     std::unique_ptr<UmoneyTransferWorker> economy_worker_;
     bool ready_{false};
 
     [[nodiscard]] bool isExchanger(const std::optional<endstone::ItemStack> &item) const;
+    [[nodiscard]] bool isPriceTag(const std::optional<endstone::ItemStack> &item) const;
     [[nodiscard]] bool canAdmin(endstone::Player &player) const;
     [[nodiscard]] std::string blockTargetKey(const endstone::Block &block) const;
     [[nodiscard]] std::string actorTargetKey(const endstone::Actor &actor) const;
@@ -72,9 +91,35 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] std::optional<ItemPrototype> prototypeForBlock(endstone::Block &block);
     [[nodiscard]] std::optional<ItemPrototype> prototypeForActor(endstone::Actor &actor);
     [[nodiscard]] bool acceptInteraction(const endstone::Player &player);
+    [[nodiscard]] FrameAddress frameAddress(const endstone::Block &block) const;
+    [[nodiscard]] static bool sameItem(const ItemPrototype &left, const ItemPrototype &right) noexcept;
 
     void toggleBlock(endstone::Player &player, endstone::Block &block);
     void queueItemFrameToggle(endstone::Player &player, endstone::Block &block);
+    using FrameCaptureCallback =
+        std::function<void(endstone::Player *, std::optional<ItemPrototype>, std::exception_ptr)>;
+    void queueItemFrameCapture(
+        endstone::Player *player, FrameAddress address, FrameCaptureCallback callback, bool announce = true);
+    void completeItemFrameCapture(FrameAddress address, std::string structure_name, std::string level_name,
+                                  std::string player_uuid, std::string player_name,
+                                  FrameCaptureCallback callback, int attempt);
+    void handlePriceTag(endstone::Player &player, endstone::Block &block);
+    void queueFramePriceCapture(endstone::Player &player, FrameAddress address,
+                                std::optional<FrameListing> existing = std::nullopt);
+    void openFrameManagementForm(endstone::Player &player, const FrameListing &listing);
+    void openFramePriceForm(endstone::Player &player, FrameAddress address, ItemPrototype item,
+                            std::optional<FrameListing> existing = std::nullopt);
+    void queueFramePurchaseReview(endstone::Player &player, const FrameListing &listing);
+    void openFramePurchaseReview(endstone::Player &player, const FrameListing &listing);
+    void queueFramePurchase(endstone::Player &player, const FrameListing &listing);
+    void settleFrameListing(const FrameListing &listing);
+    void verifyFrameClearedAndDrop(const FrameListing &listing);
+    void spawnFrameSaleDrop(const FrameListing &listing);
+    [[nodiscard]] endstone::Item *findFrameSaleDrop(Id listing_id) const;
+    void recoverFrameListings();
+    void restoreFrameListingIndex();
+    void reconcileFrameSaleItems(endstone::Player &player);
+    void protectListedFrames(std::vector<std::unique_ptr<endstone::Block>> &blocks) const;
     void toggleActor(endstone::Player &player, endstone::Actor &actor);
     void deactivate(endstone::Player *player, Id market_id, std::string_view reason, bool preserve_orders);
     void indexMarket(const Market &market);

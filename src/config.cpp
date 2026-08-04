@@ -195,7 +195,6 @@ Config Config::load(const std::filesystem::path &path)
     config.database.connect_timeout_seconds =
         integer_value("database.connect_timeout_seconds", config.database.connect_timeout_seconds);
 
-    config.market.admin_only = bool_value("market.admin_only", config.market.admin_only);
     config.market.initial_balance_cents =
         cents_value("market.initial_balance", config.market.initial_balance_cents);
     config.market.max_order_quantity =
@@ -245,7 +244,6 @@ name = "endstone_exchange"
 connect_timeout_seconds = 5
 
 [market]
-admin_only = true
 initial_balance = 10000.00
 max_order_quantity = 640
 price_min = 1

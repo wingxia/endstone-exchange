@@ -16,7 +16,6 @@ struct DatabaseConfig {
 };
 
 struct MarketConfig {
-    bool admin_only{true};
     std::int64_t initial_balance_cents{1'000'000};
     int max_order_quantity{640};
     std::int64_t price_min_cents{100};

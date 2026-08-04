@@ -59,6 +59,17 @@ class ExchangeService {
     [[nodiscard]] int pendingEconomyTransferCount();
     [[nodiscard]] Cents economyBackingDeficit();
 
+    [[nodiscard]] FrameListing upsertFrameListing(const FrameListing &listing, bool administrator = false);
+    [[nodiscard]] std::optional<FrameListing> findBoundFrameListing(std::string_view target_key);
+    [[nodiscard]] std::optional<FrameListing> findFrameListing(Id listing_id);
+    [[nodiscard]] std::vector<FrameListing> boundFrameListings();
+    [[nodiscard]] std::vector<FrameListing> unsettledFrameListings();
+    void cancelFrameListing(Id listing_id, std::string_view requester_uuid, bool administrator = false);
+    [[nodiscard]] FramePurchaseResult purchaseFrameListing(Id listing_id, std::string_view buyer_uuid,
+                                                           std::string_view buyer_name, Cents expected_price_cents);
+    void markFrameListingDropped(Id listing_id);
+    void completeFrameListingPickup(Id listing_id);
+
   private:
     Database &database_;
     Cents initial_balance_cents_;
@@ -66,6 +77,7 @@ class ExchangeService {
 
     [[nodiscard]] static Market marketFromRow(const QueryRow &row);
     [[nodiscard]] static EconomyTransfer economyTransferFromRow(const QueryRow &row);
+    [[nodiscard]] static FrameListing frameListingFromRow(const QueryRow &row);
     [[nodiscard]] Id lockActiveBook(Id market_id);
     [[nodiscard]] Cents lockedBalance(std::string_view player_uuid);
     void credit(std::string_view player_uuid, Cents amount, std::string_view reason,

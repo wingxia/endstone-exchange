@@ -17,6 +17,7 @@ enum class DeliveryClaimStatus { Prepared, Applied, Canceled };
 enum class SellEscrowStatus { Prepared, Tagged, Ordered, Canceled };
 enum class EconomyTransferDirection { Deposit, Withdraw };
 enum class EconomyTransferStatus { Prepared, ExternalApplied, Completed, Failed, Blocked };
+enum class FrameListingStatus { Active, Paid, Dropped, Claimed, Canceled };
 
 struct ItemPrototype {
     std::string type;
@@ -127,6 +128,28 @@ struct EconomyTransfer {
     std::optional<std::int64_t> external_balance_units;
     int attempt_count{0};
     std::string last_error;
+};
+
+struct FrameListing {
+    Id id{0};
+    std::string target_key;
+    std::string dimension_name;
+    int block_x{0};
+    int block_y{0};
+    int block_z{0};
+    std::string seller_uuid;
+    std::string seller_name;
+    Cents price_cents{0};
+    ItemPrototype item;
+    FrameListingStatus status{FrameListingStatus::Active};
+    std::optional<std::string> buyer_uuid;
+    std::optional<std::string> buyer_name;
+};
+
+struct FramePurchaseResult {
+    FrameListing listing;
+    Cents buyer_balance_cents{0};
+    Cents seller_balance_cents{0};
 };
 
 [[nodiscard]] inline const char *toSql(TargetKind kind) {

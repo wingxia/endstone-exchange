@@ -41,6 +41,9 @@ namespace {
 
 constexpr std::string_view TargetTagPrefix = "exchange_target_";
 constexpr std::string_view HologramTagPrefix = "exchange_hologram_";
+constexpr std::string_view FrameSaleDropTagPrefix = "exchange_frame_sale_";
+constexpr std::string_view PriceTagName = "price_tag";
+constexpr int FrameCaptureMaxAttempts = 3;
 
 bool isItemFrameBlock(const std::string_view block_type) {
     return block_type == "minecraft:frame" || block_type == "minecraft:glow_frame" ||
@@ -102,6 +105,34 @@ std::optional<std::int64_t> positiveWholeNumber(const std::string_view value) {
     return result;
 }
 
+std::string frameSaleUserError(const Language language, const std::exception &error,
+                               const Cents price_cents = 0) {
+    if (dynamic_cast<const UserError *>(&error) != nullptr) {
+        return error.what();
+    }
+    const std::string_view message = error.what();
+    if (message == "insufficient exchange balance") {
+        return tr(language, Message::FrameSaleInsufficient, formatCurrency(price_cents));
+    }
+    if (message == "frame listing price changed") {
+        return std::string(messageText(language, Message::FrameSaleChanged));
+    }
+    if (message == "frame listing is no longer available" || message == "frame listing is no longer bound" ||
+        message == "frame listing does not exist") {
+        return std::string(messageText(language, Message::FrameSaleUnavailable));
+    }
+    if (message == "frame listing belongs to another seller") {
+        return std::string(messageText(language, Message::FrameSaleOwnedByOther));
+    }
+    if (message == "frame listing is already being settled" || message == "paid frame listing cannot be canceled") {
+        return std::string(messageText(language, Message::FrameSaleSettling));
+    }
+    if (message == "seller cannot buy their own frame listing") {
+        return std::string(messageText(language, Message::FrameSaleSelfPurchase));
+    }
+    return userFacingError(language, error);
+}
+
 } // namespace
 
 void ExchangePlugin::onEnable() {
@@ -141,7 +172,10 @@ void ExchangePlugin::onEnable() {
         // still receive cancelled events and decide whether to consume them themselves.
         registerEvent(&ExchangePlugin::onPlayerInteract, *this, endstone::EventPriority::High, false);
         registerEvent(&ExchangePlugin::onPlayerInteractActor, *this, endstone::EventPriority::High, false);
+        registerEvent(&ExchangePlugin::onListedFrameBreak, *this, endstone::EventPriority::Highest, false);
         registerEvent(&ExchangePlugin::onBlockBreak, *this, endstone::EventPriority::Monitor, true);
+        registerEvent(&ExchangePlugin::onActorExplode, *this, endstone::EventPriority::Highest, false);
+        registerEvent(&ExchangePlugin::onBlockExplode, *this, endstone::EventPriority::Highest, false);
         registerEvent(&ExchangePlugin::onActorDamage, *this, endstone::EventPriority::Highest, true);
         registerEvent(&ExchangePlugin::onActorRemove, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onPlayerJoin, *this, endstone::EventPriority::Monitor);
@@ -150,9 +184,11 @@ void ExchangePlugin::onEnable() {
         registerEvent(&ExchangePlugin::onChunkLoad, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onChunkUnload, *this, endstone::EventPriority::Monitor);
         registerEvent(&ExchangePlugin::onPlayerDropItem, *this, endstone::EventPriority::Highest, true);
+        registerEvent(&ExchangePlugin::onPlayerPickupItem, *this, endstone::EventPriority::Highest, false);
 
         ready_ = true;
         restoreMarkets();
+        restoreFrameListingIndex();
         refresh_task_ = getServer().getScheduler().runTaskTimer(
             *this, [this] { refreshHolograms(); }, 1, config_.market.hologram_refresh_ticks);
         if (economy_worker_) {
@@ -160,6 +196,8 @@ void ExchangePlugin::onEnable() {
                 *this, [this] { processEconomyTransfers(); }, 1, config_.economy.recovery_interval_ticks);
             processEconomyTransfers();
         }
+        frame_recovery_task_ = getServer().getScheduler().runTaskTimer(
+            *this, [this] { recoverFrameListings(); }, 20, 100);
         getLogger().info("Endstone Exchange {} enabled with {} active markets (economy provider: {}).",
                          ENDSTONE_EXCHANGE_VERSION, markets_.size(), config_.economy.provider);
     } catch (const std::exception &error) {
@@ -174,6 +212,10 @@ void ExchangePlugin::onEnable() {
 
 void ExchangePlugin::onDisable() {
     ready_ = false;
+    if (frame_recovery_task_) {
+        frame_recovery_task_->cancel();
+        frame_recovery_task_.reset();
+    }
     if (economy_task_) {
         economy_task_->cancel();
         economy_task_.reset();
@@ -201,17 +243,20 @@ void ExchangePlugin::onDisable() {
         }
     }
     pending_frame_captures_.clear();
+    pending_frame_settlements_.clear();
     removeAllHolograms();
     service_.reset();
     database_.reset();
     markets_.clear();
     target_index_.clear();
+    frame_listing_index_.clear();
     hologram_books_.clear();
     hologram_anchors_.clear();
     loaded_chunks_.clear();
     hologram_spawn_ready_chunks_.clear();
     interaction_gate_.clear();
     open_trade_forms_.clear();
+    open_frame_forms_.clear();
     pending_join_hologram_recreates_.clear();
     join_loaded_chunks_.clear();
     pending_hologram_recreates_.clear();
@@ -487,8 +532,7 @@ void ExchangePlugin::notifyEconomyTransfer(const EconomyTransfer &transfer, cons
 }
 
 void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
-    if (!ready_ || event.getAction() != endstone::PlayerInteractEvent::Action::RightClickBlock ||
-        event.getBlock() == nullptr) {
+    if (!ready_ || event.getBlock() == nullptr) {
         return;
     }
     auto &player = event.getPlayer();
@@ -499,8 +543,78 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
         return;
     }
     const auto key = blockTargetKey(block);
-    const bool exchanger = isExchanger(event.getItem());
+    const auto listing_it = frame_listing_index_.find(key);
     const auto market = target_index_.find(key);
+
+    if (event.getAction() == endstone::PlayerInteractEvent::Action::LeftClickBlock) {
+        if (listing_it == frame_listing_index_.end()) {
+            if (market != target_index_.end() && isItemFrameBlock(block.getType())) {
+                event.cancel();
+                if (acceptInteraction(player)) {
+                    queueTradeForm(player, market->second);
+                }
+            }
+            return;
+        }
+        event.cancel();
+        if (!acceptInteraction(player)) {
+            return;
+        }
+        try {
+            const auto listing = service_->findFrameListing(listing_it->second);
+            if (!listing || listing->status == FrameListingStatus::Claimed ||
+                listing->status == FrameListingStatus::Canceled) {
+                frame_listing_index_.erase(listing_it);
+                player.sendErrorMessage("{}", messageText(languageFor(player), Message::FrameSaleUnavailable));
+                return;
+            }
+            if (listing->status != FrameListingStatus::Active) {
+                player.sendMessage("{}", messageText(languageFor(player), Message::FrameSaleSettling));
+                settleFrameListing(*listing);
+                return;
+            }
+            if (listing->seller_uuid == player.getUniqueId().str()) {
+                player.sendErrorMessage("{}", messageText(languageFor(player), Message::FrameSaleSelfPurchase));
+                return;
+            }
+            queueFramePurchaseReview(player, *listing);
+        } catch (const std::exception &error) {
+            player.sendErrorMessage("{}", tr(languageFor(player), Message::FrameSaleFailed,
+                                               userFacingError(languageFor(player), error)));
+            getLogger().warning("Frame purchase interaction failed: {}", error.what());
+        }
+        return;
+    }
+    if (event.getAction() != endstone::PlayerInteractEvent::Action::RightClickBlock) {
+        return;
+    }
+
+    const bool exchanger = isExchanger(event.getItem());
+    const bool price_tag = isPriceTag(event.getItem());
+    if (price_tag && isItemFrameBlock(block.getType())) {
+        event.cancel();
+        if (acceptInteraction(player)) {
+            handlePriceTag(player, block);
+        }
+        return;
+    }
+    if (listing_it != frame_listing_index_.end()) {
+        event.cancel();
+        if (!acceptInteraction(player)) {
+            return;
+        }
+        const auto listing = service_->findFrameListing(listing_it->second);
+        if (listing && listing->status == FrameListingStatus::Active) {
+            player.sendMessage("{}", tr(languageFor(player), Message::FrameSaleBuyHint,
+                                         formatCurrency(listing->price_cents)));
+        } else {
+            player.sendMessage("{}", messageText(languageFor(player), Message::FrameSaleSettling));
+            if (listing) {
+                settleFrameListing(*listing);
+            }
+        }
+        return;
+    }
     if (!exchanger && market == target_index_.end()) {
         return;
     }
@@ -561,6 +675,27 @@ void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
     }
 }
 
+void ExchangePlugin::onListedFrameBreak(endstone::BlockBreakEvent &event) {
+    if (!ready_ || !frame_listing_index_.contains(blockTargetKey(event.getBlock()))) {
+        return;
+    }
+    event.cancel();
+    event.getPlayer().sendErrorMessage("{}",
+                                       messageText(languageFor(event.getPlayer()), Message::FrameSaleProtected));
+}
+
+void ExchangePlugin::onActorExplode(endstone::ActorExplodeEvent &event) {
+    if (ready_) {
+        protectListedFrames(event.getBlockList());
+    }
+}
+
+void ExchangePlugin::onBlockExplode(endstone::BlockExplodeEvent &event) {
+    if (ready_) {
+        protectListedFrames(event.getBlockList());
+    }
+}
+
 void ExchangePlugin::onActorDamage(endstone::ActorDamageEvent &event) {
     if (!ready_) {
         return;
@@ -611,8 +746,10 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
     try {
         auto &player = event.getPlayer();
         open_trade_forms_.erase(player.getUniqueId().str());
+        open_frame_forms_.erase(player.getUniqueId().str());
         localizeExchangers(player);
         service_->ensureAccount(player.getUniqueId().str(), player.getName());
+        reconcileFrameSaleItems(player);
         static_cast<void>(claimDeliveries(player));
         queueInventoryResync(player);
         pending_join_hologram_recreates_.insert(player.getUniqueId().str());
@@ -626,6 +763,7 @@ void ExchangePlugin::onPlayerJoin(endstone::PlayerJoinEvent &event) {
 void ExchangePlugin::onPlayerQuit(endstone::PlayerQuitEvent &event) {
     const auto player_uuid = event.getPlayer().getUniqueId().str();
     open_trade_forms_.erase(player_uuid);
+    open_frame_forms_.erase(player_uuid);
     pending_join_hologram_recreates_.erase(player_uuid);
     join_loaded_chunks_.erase(player_uuid);
 }
@@ -687,6 +825,34 @@ void ExchangePlugin::onPlayerDropItem(endstone::PlayerDropItemEvent &event) {
     }
 }
 
+void ExchangePlugin::onPlayerPickupItem(endstone::PlayerPickupItemEvent &event) {
+    if (!ready_) {
+        return;
+    }
+    auto &drop = event.getItem();
+    auto item = drop.getItemStack();
+    const auto listing_id = frameSaleItemId(item);
+    if (!listing_id) {
+        return;
+    }
+    try {
+        service_->markFrameListingDropped(*listing_id);
+        service_->completeFrameListingPickup(*listing_id);
+        if (const auto listing = service_->findFrameListing(*listing_id)) {
+            frame_listing_index_.erase(listing->target_key);
+        }
+        if (!clearFrameSaleItemTag(item, *listing_id)) {
+            throw std::runtime_error("could not clear the frame-sale recovery marker");
+        }
+        drop.setItemStack(item);
+    } catch (const std::exception &error) {
+        event.cancel();
+        event.getPlayer().sendErrorMessage("{}", tr(languageFor(event.getPlayer()), Message::FrameSaleFailed,
+                                                      userFacingError(languageFor(event.getPlayer()), error)));
+        getLogger().warning("Frame-sale pickup settlement failed for listing {}: {}", *listing_id, error.what());
+    }
+}
+
 bool ExchangePlugin::isExchanger(const std::optional<endstone::ItemStack> &item) const {
     if (!item || std::string(item->getType().getId()) != "minecraft:stick") {
         return false;
@@ -695,8 +861,16 @@ bool ExchangePlugin::isExchanger(const std::optional<endstone::ItemStack> &item)
     return meta && meta->hasDisplayName() && lower(stripFormatting(meta->getDisplayName())) == "exchanger";
 }
 
+bool ExchangePlugin::isPriceTag(const std::optional<endstone::ItemStack> &item) const {
+    if (!item || std::string(item->getType().getId()) != "minecraft:stick") {
+        return false;
+    }
+    const auto meta = item->getItemMeta();
+    return meta && meta->hasDisplayName() && lower(stripFormatting(meta->getDisplayName())) == PriceTagName;
+}
+
 bool ExchangePlugin::canAdmin(endstone::Player &player) const {
-    return !config_.market.admin_only || player.hasPermission("exchange.admin");
+    return player.isOp();
 }
 
 std::string ExchangePlugin::blockTargetKey(const endstone::Block &block) const {
@@ -760,6 +934,14 @@ bool ExchangePlugin::acceptInteraction(const endstone::Player &player) {
     return interaction_gate_.accept(player.getUniqueId().str());
 }
 
+FrameAddress ExchangePlugin::frameAddress(const endstone::Block &block) const {
+    return {blockTargetKey(block), block.getDimension().getName(), block.getX(), block.getY(), block.getZ()};
+}
+
+bool ExchangePlugin::sameItem(const ItemPrototype &left, const ItemPrototype &right) noexcept {
+    return left.type == right.type && left.data == right.data && left.nbt == right.nbt;
+}
+
 void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &block) {
     const auto language = languageFor(player);
     if (!canAdmin(player)) {
@@ -801,121 +983,797 @@ void ExchangePlugin::toggleBlock(endstone::Player &player, endstone::Block &bloc
 }
 
 void ExchangePlugin::queueItemFrameToggle(endstone::Player &player, endstone::Block &block) {
-    const auto language = languageFor(player);
-    const auto key = blockTargetKey(block);
-    if (const auto pending = pending_frame_captures_.find(key); pending != pending_frame_captures_.end()) {
-        if (config_.market.cleanup_structure_captures) {
-            static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
-                                                          std::format("structure delete {}", pending->second)));
-        }
-        pending_frame_captures_.erase(pending);
-        player.sendMessage("{}", messageText(language, Message::FrameCanceled));
-        return;
-    }
-
-    const auto *level = getServer().getLevel();
-    if (level == nullptr) {
-        player.sendErrorMessage("{}", messageText(language, Message::WorldNotLoaded));
-        return;
-    }
-    const auto serial = std::chrono::steady_clock::now().time_since_epoch().count();
-    const auto structure_name =
-        std::format("exchange:frame_{}_{}_{}_{}", block.getX(), block.getY(), block.getZ(), serial);
-    const auto dimension_name = block.getDimension().getName();
-    const auto level_name = level->getName();
-    const int x = block.getX();
-    const int y = block.getY();
-    const int z = block.getZ();
+    const auto address = frameAddress(block);
     const auto player_uuid = player.getUniqueId().str();
-    const auto player_name = player.getName();
-    const auto command = std::format("execute in {} run structure save {} {} {} {} {} {} {} false disk true",
-                                     dimension_name, structure_name, x, y, z, x, y, z);
-    pending_frame_captures_[key] = structure_name;
-    if (!getServer().dispatchCommand(getServer().getCommandSender(), command)) {
-        pending_frame_captures_.erase(key);
-        player.sendErrorMessage("{}", messageText(language, Message::FrameReadFailed));
-        return;
-    }
-    player.sendMessage("{}", messageText(language, Message::FrameReading));
-
-    static_cast<void>(getServer().getScheduler().runTaskLater(
-        *this,
-        [this, key, structure_name, dimension_name, level_name, x, y, z, player_uuid, player_name] {
-            const auto pending = pending_frame_captures_.find(key);
-            if (pending == pending_frame_captures_.end() || pending->second != structure_name) {
+    queueItemFrameCapture(
+        &player, address,
+        [this, address, player_uuid](endstone::Player *notify, std::optional<ItemPrototype> prototype,
+                                     std::exception_ptr failure) {
+            if (notify == nullptr || notify->getUniqueId().str() != player_uuid) {
                 return;
             }
-            pending_frame_captures_.erase(pending);
-            const auto cleanup = [this, &structure_name] {
-                if (config_.market.cleanup_structure_captures) {
-                    static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
-                                                                  std::format("structure delete {}", structure_name)));
-                }
-            };
-            auto *notify = getServer().getPlayer(player_name);
-            if (notify != nullptr && notify->getUniqueId().str() != player_uuid) {
-                notify = nullptr;
-            }
-            const auto notify_language =
-                notify == nullptr ? Language::SimplifiedChinese : languageFor(*notify);
+            const auto language = languageFor(*notify);
             try {
-                if (!ready_) {
-                    cleanup();
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
+                if (target_index_.contains(address.target_key)) {
                     return;
                 }
-                const auto database_path = std::filesystem::current_path() / "worlds" / level_name / "db";
-                const auto captured = StructureReader::readItemFrameFromLevelDbLogs(database_path, structure_name);
-                const auto *current_level = getServer().getLevel();
-                auto *dimension = current_level == nullptr ? nullptr : current_level->getDimension(dimension_name);
-                auto current_block = dimension == nullptr ? nullptr : dimension->getBlockAt(x, y, z);
-                if (!current_block || !isItemFrameBlock(current_block->getType())) {
-                    throw UserError(tr(notify_language, Message::FrameMissing));
-                }
-                if (target_index_.contains(key)) {
-                    cleanup();
-                    return;
-                }
-
-                std::optional<ItemPrototype> prototype;
-                if (captured) {
-                    endstone::ItemStack item(endstone::ItemTypeId(captured->type), 1, captured->data);
-                    item.setNbt(captured->nbt);
-                    prototype = ItemPrototype{captured->type, captured->data, NbtCodec::encode(captured->nbt),
-                                              friendlyItemName(item)};
-                } else {
+                if (!prototype) {
+                    const auto *level = getServer().getLevel();
+                    auto *dimension = level == nullptr ? nullptr : level->getDimension(address.dimension_name);
+                    auto current_block =
+                        dimension == nullptr ? nullptr : dimension->getBlockAt(address.x, address.y, address.z);
+                    if (!current_block || !isItemFrameBlock(current_block->getType())) {
+                        throw UserError(tr(language, Message::FrameMissing));
+                    }
                     prototype = prototypeForBlock(*current_block);
                 }
                 if (!prototype) {
-                    throw UserError(tr(notify_language, Message::FrameNoItem));
+                    throw UserError(tr(language, Message::FrameNoItem));
                 }
 
                 Market market;
-                market.target_key = key;
+                market.target_key = address.target_key;
                 market.target_kind = TargetKind::Block;
-                market.dimension_name = dimension_name;
-                market.block_x = x;
-                market.block_y = y;
-                market.block_z = z;
+                market.dimension_name = address.dimension_name;
+                market.block_x = address.x;
+                market.block_y = address.y;
+                market.block_z = address.z;
                 market.item = *prototype;
                 market.created_by = player_uuid;
                 market = service_->activateMarket(market);
                 indexMarket(market);
                 refreshHologram(market);
-                if (notify != nullptr) {
-                    notify->sendMessage("{}", tr(notify_language, Message::FrameEnabled,
-                                                 localizedItemName(market.item, notify_language)));
-                }
-                cleanup();
+                notify->sendMessage("{}",
+                                    tr(language, Message::FrameEnabled, localizedItemName(market.item, language)));
             } catch (const std::exception &error) {
-                cleanup();
-                if (notify != nullptr) {
-                    notify->sendErrorMessage("{}", tr(notify_language, Message::FrameActivationFailed,
-                                                      userFacingError(notify_language, error)));
-                }
+                notify->sendErrorMessage("{}", tr(language, Message::FrameActivationFailed,
+                                                   userFacingError(language, error)));
                 getLogger().warning("Item-frame activation failed: {}", error.what());
             }
         },
+        true);
+}
+
+void ExchangePlugin::queueItemFrameCapture(
+    endstone::Player *player, FrameAddress address, FrameCaptureCallback callback, const bool announce) {
+    const auto language = player == nullptr ? Language::SimplifiedChinese : languageFor(*player);
+    if (pending_frame_captures_.contains(address.target_key)) {
+        callback(player, std::nullopt,
+                 std::make_exception_ptr(UserError(tr(language, Message::FrameSaleBusy))));
+        return;
+    }
+    const auto *level = getServer().getLevel();
+    if (level == nullptr) {
+        callback(player, std::nullopt,
+                 std::make_exception_ptr(UserError(tr(language, Message::WorldNotLoaded))));
+        return;
+    }
+
+    const auto serial = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto structure_name =
+        std::format("exchange:frame_{}_{}_{}_{}", address.x, address.y, address.z, serial);
+    const auto level_name = level->getName();
+    const auto player_uuid = player == nullptr ? std::string{} : player->getUniqueId().str();
+    const auto player_name = player == nullptr ? std::string{} : player->getName();
+    const auto command = std::format("execute in {} run structure save {} {} {} {} {} {} {} false disk true",
+                                     address.dimension_name, structure_name, address.x, address.y, address.z,
+                                     address.x, address.y, address.z);
+    pending_frame_captures_[address.target_key] = structure_name;
+    if (!getServer().dispatchCommand(getServer().getCommandSender(), command)) {
+        pending_frame_captures_.erase(address.target_key);
+        callback(player, std::nullopt,
+                 std::make_exception_ptr(UserError(tr(language, Message::FrameReadFailed))));
+        return;
+    }
+    if (announce && player != nullptr) {
+        player->sendMessage("{}", messageText(language, Message::FrameSaleReading));
+    }
+
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, address = std::move(address), structure_name, level_name, player_uuid, player_name,
+          callback = std::move(callback)]() mutable {
+            completeItemFrameCapture(std::move(address), std::move(structure_name), std::move(level_name),
+                                     std::move(player_uuid), std::move(player_name), std::move(callback), 1);
+        },
         config_.market.frame_capture_delay_ticks));
+}
+
+void ExchangePlugin::completeItemFrameCapture(FrameAddress address, std::string structure_name,
+                                              std::string level_name, std::string player_uuid,
+                                              std::string player_name, FrameCaptureCallback callback,
+                                              const int attempt) {
+    const auto pending = pending_frame_captures_.find(address.target_key);
+    if (pending == pending_frame_captures_.end() || pending->second != structure_name) {
+        return;
+    }
+    const auto cleanup = [this, &structure_name] {
+        if (config_.market.cleanup_structure_captures) {
+            static_cast<void>(getServer().dispatchCommand(getServer().getCommandSender(),
+                                                          std::format("structure delete {}", structure_name)));
+        }
+    };
+    if (!ready_) {
+        pending_frame_captures_.erase(pending);
+        cleanup();
+        return;
+    }
+
+    const auto database_path = std::filesystem::current_path() / "worlds" / level_name / "db";
+    std::optional<CapturedFrameItem> captured;
+    try {
+        captured = StructureReader::readItemFrameFromLevelDbLogs(database_path, structure_name);
+    } catch (...) {
+        if (attempt < FrameCaptureMaxAttempts) {
+            const auto save_command =
+                std::format("execute in {} run structure save {} {} {} {} {} {} {} false disk true",
+                            address.dimension_name, structure_name, address.x, address.y, address.z, address.x,
+                            address.y, address.z);
+            if (getServer().dispatchCommand(getServer().getCommandSender(), save_command)) {
+                getLogger().debug("Frame capture {} was not visible in LevelDB; retrying ({}/{})",
+                                  structure_name, attempt + 1, FrameCaptureMaxAttempts);
+                static_cast<void>(getServer().getScheduler().runTaskLater(
+                    *this,
+                    [this, address = std::move(address), structure_name = std::move(structure_name),
+                     level_name = std::move(level_name), player_uuid = std::move(player_uuid),
+                     player_name = std::move(player_name), callback = std::move(callback), attempt]() mutable {
+                        completeItemFrameCapture(
+                            std::move(address), std::move(structure_name), std::move(level_name),
+                            std::move(player_uuid), std::move(player_name), std::move(callback), attempt + 1);
+                    },
+                    config_.market.frame_capture_delay_ticks));
+                return;
+            }
+        }
+
+        pending_frame_captures_.erase(pending);
+        auto *notify = player_name.empty() ? nullptr : getServer().getPlayer(player_name);
+        if (notify != nullptr && notify->getUniqueId().str() != player_uuid) {
+            notify = nullptr;
+        }
+        const auto failure = std::current_exception();
+        cleanup();
+        callback(notify, std::nullopt, failure);
+        return;
+    }
+
+    pending_frame_captures_.erase(pending);
+    auto *notify = player_name.empty() ? nullptr : getServer().getPlayer(player_name);
+    if (notify != nullptr && notify->getUniqueId().str() != player_uuid) {
+        notify = nullptr;
+    }
+    std::optional<ItemPrototype> prototype;
+    std::exception_ptr failure;
+    try {
+        const auto *current_level = getServer().getLevel();
+        auto *dimension = current_level == nullptr ? nullptr : current_level->getDimension(address.dimension_name);
+        auto current_block =
+            dimension == nullptr ? nullptr : dimension->getBlockAt(address.x, address.y, address.z);
+        if (!current_block || !isItemFrameBlock(current_block->getType())) {
+            const auto current_language = notify == nullptr ? Language::SimplifiedChinese : languageFor(*notify);
+            throw UserError(tr(current_language, Message::FrameMissing));
+        }
+        if (captured) {
+            endstone::ItemStack item(endstone::ItemTypeId(captured->type), 1, captured->data);
+            item.setNbt(captured->nbt);
+            prototype = ItemPrototype{captured->type, captured->data, NbtCodec::encode(captured->nbt),
+                                      friendlyItemName(item)};
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    cleanup();
+    callback(notify, std::move(prototype), failure);
+}
+
+void ExchangePlugin::handlePriceTag(endstone::Player &player, endstone::Block &block) {
+    const auto language = languageFor(player);
+    const auto address = frameAddress(block);
+    try {
+        if (target_index_.contains(address.target_key)) {
+            player.sendErrorMessage("{}", messageText(language, Message::FrameSaleMarketConflict));
+            return;
+        }
+        const auto listing = service_->findBoundFrameListing(address.target_key);
+        if (!listing) {
+            frame_listing_index_.erase(address.target_key);
+            queueFramePriceCapture(player, address);
+            return;
+        }
+        frame_listing_index_[address.target_key] = listing->id;
+        if (listing->status != FrameListingStatus::Active) {
+            player.sendMessage("{}", messageText(language, Message::FrameSaleSettling));
+            settleFrameListing(*listing);
+            return;
+        }
+        if (listing->seller_uuid != player.getUniqueId().str() && !player.isOp()) {
+            player.sendErrorMessage("{}", messageText(language, Message::FrameSaleOwnedByOther));
+            return;
+        }
+        const auto player_uuid = player.getUniqueId().str();
+        const auto player_name = player.getName();
+        static_cast<void>(getServer().getScheduler().runTaskLater(
+            *this,
+            [this, player_uuid, player_name, listing = *listing] {
+                if (!ready_) {
+                    return;
+                }
+                auto *current = getServer().getPlayer(player_name);
+                if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                    openFrameManagementForm(*current, listing);
+                }
+            },
+            1));
+    } catch (const std::exception &error) {
+        player.sendErrorMessage("{}", tr(language, Message::FrameSaleFailed,
+                                           frameSaleUserError(language, error)));
+        getLogger().warning("Opening frame listing management failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::queueFramePriceCapture(endstone::Player &player, FrameAddress address,
+                                            std::optional<FrameListing> existing) {
+    const auto player_uuid = player.getUniqueId().str();
+    queueItemFrameCapture(
+        &player, address,
+        [this, address, existing = std::move(existing), player_uuid](
+            endstone::Player *notify, std::optional<ItemPrototype> item, std::exception_ptr failure) mutable {
+            if (notify == nullptr || notify->getUniqueId().str() != player_uuid) {
+                return;
+            }
+            const auto language = languageFor(*notify);
+            try {
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
+                if (!item) {
+                    throw UserError(tr(language, Message::FrameNoItem));
+                }
+                if (existing && !sameItem(existing->item, *item)) {
+                    throw UserError(tr(language, Message::FrameSaleChanged));
+                }
+                openFramePriceForm(*notify, address, *item, std::move(existing));
+            } catch (const std::exception &error) {
+                notify->sendErrorMessage("{}", tr(language, Message::FrameSaleFailed,
+                                                   frameSaleUserError(language, error)));
+                getLogger().warning("Reading frame listing item failed: {}", error.what());
+            }
+        },
+        true);
+}
+
+void ExchangePlugin::openFrameManagementForm(endstone::Player &player, const FrameListing &listing) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
+    if (!open_frame_forms_.insert(player_uuid).second) {
+        return;
+    }
+    try {
+        const auto current = service_->findBoundFrameListing(listing.target_key);
+        if (!current || current->id != listing.id || current->status != FrameListingStatus::Active) {
+            throw UserError(tr(language, Message::FrameSaleUnavailable));
+        }
+        if (current->seller_uuid != player_uuid && !player.isOp()) {
+            throw UserError(tr(language, Message::FrameSaleOwnedByOther));
+        }
+        const FrameAddress address{current->target_key, current->dimension_name, current->block_x,
+                                   current->block_y, current->block_z};
+        const auto item_name = localizedItemName(current->item, language);
+        endstone::ActionForm form;
+        form.setTitle(std::string(messageText(language, Message::FrameSaleManageTitle)))
+            .setContent(tr(language, Message::FrameSaleManageContent, item_name,
+                           formatCurrency(current->price_cents), current->seller_name))
+            .addButton(std::string(messageText(language, Message::FrameSaleChangePrice)), std::nullopt,
+                       [this, player_uuid, address, listing = *current](endstone::Player *form_player) {
+                           open_frame_forms_.erase(player_uuid);
+                           if (form_player == nullptr || !ready_ ||
+                               form_player->getUniqueId().str() != player_uuid) {
+                               return;
+                           }
+                           form_player->closeForm();
+                           queueFramePriceCapture(*form_player, address, listing);
+                       })
+            .addButton(std::string(messageText(language, Message::FrameSaleCancelButton)), std::nullopt,
+                       [this, player_uuid, listing = *current](endstone::Player *form_player) {
+                           open_frame_forms_.erase(player_uuid);
+                           if (form_player == nullptr || !ready_ ||
+                               form_player->getUniqueId().str() != player_uuid) {
+                               return;
+                           }
+                           form_player->closeForm();
+                           const auto form_language = languageFor(*form_player);
+                           try {
+                               service_->cancelFrameListing(listing.id, player_uuid, form_player->isOp());
+                               frame_listing_index_.erase(listing.target_key);
+                               form_player->sendMessage(
+                                   "{}", messageText(form_language, Message::FrameSaleCanceled));
+                           } catch (const std::exception &error) {
+                               form_player->sendErrorMessage(
+                                   "{}", tr(form_language, Message::FrameSaleFailed,
+                                            frameSaleUserError(form_language, error)));
+                           }
+                       })
+            .setOnClose([this, player_uuid](endstone::Player *) { open_frame_forms_.erase(player_uuid); });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_frame_forms_.erase(player_uuid);
+        player.sendErrorMessage("{}",
+                                tr(language, Message::FrameSaleFailed, frameSaleUserError(language, error)));
+        getLogger().warning("Frame listing management form failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::openFramePriceForm(endstone::Player &player, FrameAddress address, ItemPrototype item,
+                                        std::optional<FrameListing> existing) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
+    if (!open_frame_forms_.insert(player_uuid).second) {
+        return;
+    }
+    try {
+        const auto item_name = localizedItemName(item, language);
+        const auto default_price = existing ? existing->price_cents : config_.market.price_min_cents;
+        endstone::ModalForm form;
+        form.setTitle(std::string(messageText(language, Message::FrameSalePriceTitle)))
+            .addControl(endstone::TextInput(
+                tr(language, Message::FrameSalePricePrompt, item_name,
+                   formatUnitPrice(config_.market.price_min_cents),
+                   formatUnitPrice(config_.market.price_max_cents)),
+                std::string(messageText(language, Message::PricePlaceholder)),
+                std::to_string(default_price / 100)))
+            .setSubmitButton(std::string(messageText(language, Message::ContinueButton)))
+            .setOnClose([this, player_uuid](endstone::Player *) { open_frame_forms_.erase(player_uuid); })
+            .setOnSubmit([this, player_uuid, address = std::move(address), item = std::move(item),
+                          existing = std::move(existing)](endstone::Player *form_player,
+                                                          std::string response) mutable {
+                open_frame_forms_.erase(player_uuid);
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
+                }
+                form_player->closeForm();
+                const auto form_language = languageFor(*form_player);
+                try {
+                    const auto values = textFormValues(response, form_language);
+                    if (values.size() != 1) {
+                        throw UserError(tr(form_language, Message::InvalidFormData));
+                    }
+                    const auto price = parseTradePrice(values.front(), config_.market.price_min_cents,
+                                                       config_.market.price_max_cents,
+                                                       config_.market.price_step_cents, form_language);
+                    const auto seller_uuid = existing ? existing->seller_uuid : player_uuid;
+                    const auto seller_name = existing ? existing->seller_name : form_player->getName();
+                    queueItemFrameCapture(
+                        form_player, address,
+                        [this, address, item, existing, player_uuid, seller_uuid, seller_name, price](
+                            endstone::Player *notify, std::optional<ItemPrototype> current_item,
+                            std::exception_ptr failure) {
+                            if (notify == nullptr || notify->getUniqueId().str() != player_uuid) {
+                                return;
+                            }
+                            const auto notify_language = languageFor(*notify);
+                            try {
+                                if (failure) {
+                                    std::rethrow_exception(failure);
+                                }
+                                if (!current_item || !sameItem(item, *current_item)) {
+                                    throw UserError(tr(notify_language, Message::FrameSaleChanged));
+                                }
+                                if (target_index_.contains(address.target_key)) {
+                                    throw UserError(tr(notify_language, Message::FrameSaleMarketConflict));
+                                }
+                                FrameListing draft;
+                                draft.target_key = address.target_key;
+                                draft.dimension_name = address.dimension_name;
+                                draft.block_x = address.x;
+                                draft.block_y = address.y;
+                                draft.block_z = address.z;
+                                draft.seller_uuid = seller_uuid;
+                                draft.seller_name = seller_name;
+                                draft.price_cents = price;
+                                draft.item = item;
+                                const auto saved = service_->upsertFrameListing(draft, notify->isOp());
+                                frame_listing_index_[saved.target_key] = saved.id;
+                                notify->sendMessage(
+                                    "{}", tr(notify_language, Message::FrameSaleListed,
+                                             localizedItemName(saved.item, notify_language),
+                                             formatCurrency(saved.price_cents)));
+                            } catch (const std::exception &error) {
+                                notify->sendErrorMessage(
+                                    "{}", tr(notify_language, Message::FrameSaleFailed,
+                                             frameSaleUserError(notify_language, error, price)));
+                                getLogger().warning("Saving frame listing failed: {}", error.what());
+                            }
+                        },
+                        true);
+                } catch (const std::exception &error) {
+                    form_player->sendErrorMessage(
+                        "{}", tr(form_language, Message::InputInvalid,
+                                 frameSaleUserError(form_language, error)));
+                    const auto player_name = form_player->getName();
+                    static_cast<void>(getServer().getScheduler().runTaskLater(
+                        *this,
+                        [this, player_uuid, player_name, address, item, existing] {
+                            auto *current = getServer().getPlayer(player_name);
+                            if (ready_ && current != nullptr && current->getUniqueId().str() == player_uuid) {
+                                openFramePriceForm(*current, address, item, existing);
+                            }
+                        },
+                        1));
+                }
+            });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_frame_forms_.erase(player_uuid);
+        player.sendErrorMessage("{}",
+                                tr(language, Message::FrameSaleFailed, frameSaleUserError(language, error)));
+        getLogger().warning("Frame listing price form failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::queueFramePurchaseReview(endstone::Player &player, const FrameListing &listing) {
+    const auto player_uuid = player.getUniqueId().str();
+    const FrameAddress address{listing.target_key, listing.dimension_name, listing.block_x, listing.block_y,
+                               listing.block_z};
+    queueItemFrameCapture(
+        &player, address,
+        [this, listing, player_uuid](endstone::Player *notify, std::optional<ItemPrototype> current_item,
+                                     std::exception_ptr failure) {
+            if (notify == nullptr || notify->getUniqueId().str() != player_uuid) {
+                return;
+            }
+            const auto language = languageFor(*notify);
+            try {
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
+                const auto current = service_->findBoundFrameListing(listing.target_key);
+                if (!current || current->id != listing.id || current->status != FrameListingStatus::Active ||
+                    current->price_cents != listing.price_cents || !current_item ||
+                    !sameItem(listing.item, *current_item)) {
+                    throw UserError(tr(language, Message::FrameSaleChanged));
+                }
+                openFramePurchaseReview(*notify, *current);
+            } catch (const std::exception &error) {
+                notify->sendErrorMessage("{}", tr(language, Message::FrameSaleFailed,
+                                                   frameSaleUserError(language, error, listing.price_cents)));
+                getLogger().warning("Frame purchase review validation failed: {}", error.what());
+            }
+        },
+        true);
+}
+
+void ExchangePlugin::openFramePurchaseReview(endstone::Player &player, const FrameListing &listing) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
+    if (!open_frame_forms_.insert(player_uuid).second) {
+        return;
+    }
+    try {
+        const auto current = service_->findBoundFrameListing(listing.target_key);
+        if (!current || current->id != listing.id || current->status != FrameListingStatus::Active ||
+            current->price_cents != listing.price_cents) {
+            throw UserError(tr(language, Message::FrameSaleChanged));
+        }
+        service_->ensureAccount(player_uuid, player.getName());
+        const auto account_balance = service_->balance(player_uuid);
+        const auto item_name = localizedItemName(current->item, language);
+        endstone::MessageForm form;
+        form.setTitle(tr(language, Message::FrameSaleConfirmTitle, item_name))
+            .setContent(tr(language, Message::FrameSaleConfirmContent, current->seller_name,
+                           formatCurrency(current->price_cents), formatCurrency(account_balance)))
+            .setButton1(std::string(messageText(language, Message::FrameSaleConfirmButton)))
+            .setButton2(std::string(messageText(language, Message::FrameSaleDeclineButton)))
+            .setOnSubmit([this, player_uuid, listing = *current](endstone::Player *form_player,
+                                                                 const int selection) {
+                open_frame_forms_.erase(player_uuid);
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
+                }
+                form_player->closeForm();
+                if (selection == 0) {
+                    queueFramePurchase(*form_player, listing);
+                }
+            })
+            .setOnClose([this, player_uuid](endstone::Player *) { open_frame_forms_.erase(player_uuid); });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_frame_forms_.erase(player_uuid);
+        player.sendErrorMessage("{}", tr(language, Message::FrameSaleFailed,
+                                           frameSaleUserError(language, error, listing.price_cents)));
+        getLogger().warning("Frame purchase confirmation form failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::queueFramePurchase(endstone::Player &player, const FrameListing &listing) {
+    const auto player_uuid = player.getUniqueId().str();
+    const FrameAddress address{listing.target_key, listing.dimension_name, listing.block_x, listing.block_y,
+                               listing.block_z};
+    queueItemFrameCapture(
+        &player, address,
+        [this, listing, player_uuid](endstone::Player *notify, std::optional<ItemPrototype> current_item,
+                                     std::exception_ptr failure) {
+            if (notify == nullptr || notify->getUniqueId().str() != player_uuid) {
+                return;
+            }
+            const auto language = languageFor(*notify);
+            try {
+                if (failure) {
+                    std::rethrow_exception(failure);
+                }
+                const auto current = service_->findBoundFrameListing(listing.target_key);
+                if (!current || current->id != listing.id || current->status != FrameListingStatus::Active ||
+                    current->price_cents != listing.price_cents || !current_item ||
+                    !sameItem(listing.item, *current_item)) {
+                    throw UserError(tr(language, Message::FrameSaleChanged));
+                }
+                const auto result = service_->purchaseFrameListing(
+                    current->id, player_uuid, notify->getName(), listing.price_cents);
+                frame_listing_index_[result.listing.target_key] = result.listing.id;
+                notify->sendMessage("{}", tr(language, Message::FrameSalePaidBuyer,
+                                               formatCurrency(result.listing.price_cents),
+                                               formatCurrency(result.buyer_balance_cents)));
+                if (auto *seller = getServer().getPlayer(result.listing.seller_name);
+                    seller != nullptr && seller->getUniqueId().str() == result.listing.seller_uuid) {
+                    const auto seller_language = languageFor(*seller);
+                    seller->sendMessage(
+                        "{}", tr(seller_language, Message::FrameSalePaidSeller, notify->getName(),
+                                 localizedItemName(result.listing.item, seller_language),
+                                 formatCurrency(result.listing.price_cents),
+                                 formatCurrency(result.seller_balance_cents)));
+                }
+                settleFrameListing(result.listing);
+            } catch (const std::exception &error) {
+                notify->sendErrorMessage("{}", tr(language, Message::FrameSaleFailed,
+                                                   frameSaleUserError(language, error, listing.price_cents)));
+                getLogger().warning("Frame purchase submission failed: {}", error.what());
+            }
+        },
+        true);
+}
+
+void ExchangePlugin::settleFrameListing(const FrameListing &listing) {
+    if (!ready_) {
+        return;
+    }
+    if (listing.status == FrameListingStatus::Claimed || listing.status == FrameListingStatus::Canceled) {
+        frame_listing_index_.erase(listing.target_key);
+        return;
+    }
+    if (listing.status != FrameListingStatus::Paid && listing.status != FrameListingStatus::Dropped) {
+        return;
+    }
+    if (auto *existing_drop = findFrameSaleDrop(listing.id); existing_drop != nullptr) {
+        try {
+            auto item = existing_drop->getItemStack();
+            if (frameSaleItemId(item) != listing.id) {
+                tagFrameSaleItem(item, listing.id);
+                existing_drop->setItemStack(item);
+            }
+            static_cast<void>(existing_drop->addScoreboardTag(
+                std::string(FrameSaleDropTagPrefix) + std::to_string(listing.id)));
+            existing_drop->setUnlimitedLifetime(true);
+            service_->markFrameListingDropped(listing.id);
+        } catch (const std::exception &error) {
+            getLogger().warning("Adopting frame-sale drop {} failed: {}", listing.id, error.what());
+        }
+        pending_frame_settlements_.erase(listing.id);
+        return;
+    }
+    if (pending_frame_settlements_.contains(listing.id)) {
+        return;
+    }
+    if (!loaded_chunks_.contains(chunkKey(listing.dimension_name, blockToChunk(listing.block_x),
+                                          blockToChunk(listing.block_z)))) {
+        return;
+    }
+    const auto *level = getServer().getLevel();
+    auto *dimension = level == nullptr ? nullptr : level->getDimension(listing.dimension_name);
+    auto block = dimension == nullptr ? nullptr : dimension->getBlockAt(listing.block_x, listing.block_y,
+                                                                         listing.block_z);
+    if (!block || !isItemFrameBlock(block->getType())) {
+        spawnFrameSaleDrop(listing);
+        return;
+    }
+
+    pending_frame_settlements_.insert(listing.id);
+    const FrameAddress address{listing.target_key, listing.dimension_name, listing.block_x, listing.block_y,
+                               listing.block_z};
+    queueItemFrameCapture(
+        nullptr, address,
+        [this, listing](endstone::Player *, std::optional<ItemPrototype> current_item,
+                        std::exception_ptr failure) {
+            if (failure) {
+                pending_frame_settlements_.erase(listing.id);
+                try {
+                    std::rethrow_exception(failure);
+                } catch (const std::exception &error) {
+                    getLogger().warning("Frame-sale settlement capture {} failed: {}", listing.id, error.what());
+                }
+                return;
+            }
+            if (!current_item || !sameItem(listing.item, *current_item)) {
+                spawnFrameSaleDrop(listing);
+                return;
+            }
+
+            try {
+                const auto *level = getServer().getLevel();
+                auto *dimension = level == nullptr ? nullptr : level->getDimension(listing.dimension_name);
+                auto block = dimension == nullptr
+                                 ? nullptr
+                                 : dimension->getBlockAt(listing.block_x, listing.block_y, listing.block_z);
+                if (!block || !isItemFrameBlock(block->getType())) {
+                    spawnFrameSaleDrop(listing);
+                    return;
+                }
+
+                // Item frames have BlockActor inventory data, but BDS does not expose them as
+                // command containers (`replaceitem block` reports "not a container"). Recreate
+                // the same frame block without physics so its facing/state survives while the
+                // BlockActor item is cleared without producing an untracked vanilla drop.
+                const auto frame_data = block->getData();
+                if (!frame_data) {
+                    throw std::runtime_error("could not capture item-frame block data");
+                }
+                block->setType("minecraft:air", false);
+                block->setData(*frame_data, false);
+                verifyFrameClearedAndDrop(listing);
+            } catch (const std::exception &error) {
+                pending_frame_settlements_.erase(listing.id);
+                getLogger().warning("Clearing item frame for paid listing {} failed: {}", listing.id,
+                                    error.what());
+            }
+        },
+        false);
+}
+
+void ExchangePlugin::verifyFrameClearedAndDrop(const FrameListing &listing) {
+    const FrameAddress address{listing.target_key, listing.dimension_name, listing.block_x, listing.block_y,
+                               listing.block_z};
+    queueItemFrameCapture(
+        nullptr, address,
+        [this, listing](endstone::Player *, std::optional<ItemPrototype> current_item,
+                        std::exception_ptr failure) {
+            if (failure) {
+                const auto *level = getServer().getLevel();
+                auto *dimension = level == nullptr ? nullptr : level->getDimension(listing.dimension_name);
+                auto block = dimension == nullptr
+                                 ? nullptr
+                                 : dimension->getBlockAt(listing.block_x, listing.block_y, listing.block_z);
+                if (!block || !isItemFrameBlock(block->getType())) {
+                    spawnFrameSaleDrop(listing);
+                    return;
+                }
+                pending_frame_settlements_.erase(listing.id);
+                try {
+                    std::rethrow_exception(failure);
+                } catch (const std::exception &error) {
+                    getLogger().warning("Verifying cleared frame listing {} failed: {}", listing.id,
+                                        error.what());
+                }
+                return;
+            }
+            if (current_item && sameItem(listing.item, *current_item)) {
+                pending_frame_settlements_.erase(listing.id);
+                getLogger().warning("Item frame for paid listing {} was not cleared; recovery will retry",
+                                    listing.id);
+                return;
+            }
+            spawnFrameSaleDrop(listing);
+        },
+        false);
+}
+
+void ExchangePlugin::spawnFrameSaleDrop(const FrameListing &listing) {
+    try {
+        if (auto *existing = findFrameSaleDrop(listing.id); existing != nullptr) {
+            service_->markFrameListingDropped(listing.id);
+            pending_frame_settlements_.erase(listing.id);
+            return;
+        }
+        const auto *level = getServer().getLevel();
+        auto *dimension = level == nullptr ? nullptr : level->getDimension(listing.dimension_name);
+        if (dimension == nullptr) {
+            throw std::runtime_error("frame-sale dimension is not loaded");
+        }
+        endstone::ItemStack item(endstone::ItemTypeId(listing.item.type), 1, listing.item.data);
+        if (!listing.item.nbt.empty()) {
+            item.setNbt(NbtCodec::decode(listing.item.nbt));
+        }
+        tagFrameSaleItem(item, listing.id);
+        auto &drop = dimension->dropItem(
+            endstone::Location(*dimension, static_cast<float>(listing.block_x) + 0.5F,
+                               static_cast<float>(listing.block_y) + 0.5F,
+                               static_cast<float>(listing.block_z) + 0.5F),
+            item);
+        drop.setPickupDelay(20);
+        drop.setUnlimitedLifetime(true);
+        static_cast<void>(drop.addScoreboardTag(
+            std::string(FrameSaleDropTagPrefix) + std::to_string(listing.id)));
+        service_->markFrameListingDropped(listing.id);
+        pending_frame_settlements_.erase(listing.id);
+    } catch (const std::exception &error) {
+        pending_frame_settlements_.erase(listing.id);
+        getLogger().warning("Spawning recovery-safe drop for frame listing {} failed: {}", listing.id,
+                            error.what());
+    }
+}
+
+endstone::Item *ExchangePlugin::findFrameSaleDrop(const Id listing_id) const {
+    const auto *level = getServer().getLevel();
+    if (level == nullptr) {
+        return nullptr;
+    }
+    const auto scoreboard_tag = std::string(FrameSaleDropTagPrefix) + std::to_string(listing_id);
+    for (auto *actor : level->getActors()) {
+        if (actor == nullptr || !actor->isValid()) {
+            continue;
+        }
+        auto *item = actor->asItem();
+        if (item != nullptr &&
+            (frameSaleItemId(item->getItemStack()) == listing_id || hasTag(*actor, scoreboard_tag))) {
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+void ExchangePlugin::recoverFrameListings() {
+    if (!ready_) {
+        return;
+    }
+    try {
+        for (const auto &listing : service_->unsettledFrameListings()) {
+            frame_listing_index_[listing.target_key] = listing.id;
+            settleFrameListing(listing);
+        }
+    } catch (const std::exception &error) {
+        getLogger().warning("Frame listing recovery pass failed: {}", error.what());
+    }
+}
+
+void ExchangePlugin::restoreFrameListingIndex() {
+    frame_listing_index_.clear();
+    for (const auto &listing : service_->boundFrameListings()) {
+        frame_listing_index_[listing.target_key] = listing.id;
+    }
+}
+
+void ExchangePlugin::reconcileFrameSaleItems(endstone::Player &player) {
+    auto &inventory = player.getInventory();
+    const auto reconcile = [this](endstone::ItemStack &item) {
+        const auto listing_id = frameSaleItemId(item);
+        if (!listing_id) {
+            return false;
+        }
+        service_->markFrameListingDropped(*listing_id);
+        service_->completeFrameListingPickup(*listing_id);
+        if (const auto listing = service_->findFrameListing(*listing_id)) {
+            frame_listing_index_.erase(listing->target_key);
+        }
+        return clearFrameSaleItemTag(item, *listing_id);
+    };
+    for (int slot = 0; slot < inventory.getSize(); ++slot) {
+        auto item = inventory.getItem(slot);
+        if (item && reconcile(*item)) {
+            inventory.clear(slot);
+            inventory.setItem(slot, std::move(item));
+        }
+    }
+    auto offhand = inventory.getItemInOffHand();
+    if (offhand && reconcile(*offhand)) {
+        inventory.setItemInOffHand(std::nullopt);
+        inventory.setItemInOffHand(std::move(*offhand));
+    }
+}
+
+void ExchangePlugin::protectListedFrames(std::vector<std::unique_ptr<endstone::Block>> &blocks) const {
+    std::erase_if(blocks, [this](const std::unique_ptr<endstone::Block> &block) {
+        return block != nullptr && frame_listing_index_.contains(blockTargetKey(*block));
+    });
 }
 
 void ExchangePlugin::toggleActor(endstone::Player &player, endstone::Actor &actor) {

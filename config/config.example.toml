@@ -10,7 +10,6 @@ name = "endstone_exchange"
 connect_timeout_seconds = 5
 
 [market]
-admin_only = true
 initial_balance = 10000.00
 max_order_quantity = 640
 price_min = 1

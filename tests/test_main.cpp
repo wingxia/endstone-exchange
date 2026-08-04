@@ -92,6 +92,15 @@ void testDeliveryMarkerCleanup() {
     tagged.insert_or_assign("__endstone_exchange_claim", endstone::StringTag("58"));
     require(!exchange::clearDeliveryClaimTag(tagged, 57) && tagged.contains("__endstone_exchange_claim"),
             "delivery cleanup must not remove a different claim marker");
+
+    endstone::CompoundTag frame_sale_item;
+    frame_sale_item.insert_or_assign("custom", endstone::StringTag("kept"));
+    exchange::tagFrameSaleItem(frame_sale_item, 91);
+    require(exchange::frameSaleItemId(frame_sale_item) == 91,
+            "frame-sale drop marker must survive on the physical item");
+    require(exchange::clearFrameSaleItemTag(frame_sale_item, 91) &&
+                !exchange::frameSaleItemId(frame_sale_item).has_value() && frame_sale_item.contains("custom"),
+            "frame-sale marker cleanup must preserve a usable purchased item");
 }
 
 void testConfig() {
@@ -640,6 +649,8 @@ void testLiveLevelDbStructureCapture() {
 
 void truncateExchangeTables(exchange::Database &database) {
     database.execute("SET FOREIGN_KEY_CHECKS=0");
+    database.execute("TRUNCATE TABLE exchange_frame_listing_bindings");
+    database.execute("TRUNCATE TABLE exchange_frame_listings");
     database.execute("TRUNCATE TABLE exchange_target_bindings");
     database.execute("TRUNCATE TABLE exchange_economy_transfers");
     database.execute("TRUNCATE TABLE exchange_balance_ledger");
@@ -692,11 +703,15 @@ void testDatabaseIntegration() {
     require(reopenable_column.size() == 1, "version 5 upgrade must add the reopenable market column");
     database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
-    require(exchange::cellInt(schema_version.front(), 0) == 8, "database migrations must be idempotent at version 8");
+    require(exchange::cellInt(schema_version.front(), 0) == 9, "database migrations must be idempotent at version 9");
     const auto economy_schema = database.query(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "AND TABLE_NAME='exchange_economy_transfers' AND COLUMN_NAME='amount_units'");
     require(economy_schema.size() == 1, "version 8 must create durable UMoney transfer storage");
+    const auto frame_listing_schema = database.query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+        "AND TABLE_NAME='exchange_frame_listings' AND COLUMN_NAME='status'");
+    require(frame_listing_schema.size() == 1, "version 9 must create durable item-frame listing storage");
     const auto book_schema = database.query(
         "SELECT m.book_id,b.id FROM exchange_markets m LEFT JOIN exchange_books b ON b.id=m.book_id LIMIT 1");
     require(book_schema.empty() || exchange::cellInt64(book_schema.front(), 0) == exchange::cellInt64(book_schema.front(), 1),
@@ -1234,6 +1249,126 @@ void testDatabaseIntegration() {
                                    delivery.quantity - delivery.claimed_quantity - delivery.reserved_quantity == 1;
                         }),
             "whole-stack sell escrow must return over-tagged items through durable delivery");
+
+    exchange::FrameListing frame_listing;
+    frame_listing.target_key = "block|overworld|40|70|40";
+    frame_listing.dimension_name = "overworld";
+    frame_listing.block_x = 40;
+    frame_listing.block_y = 70;
+    frame_listing.block_z = 40;
+    frame_listing.seller_uuid = std::string(Bob);
+    frame_listing.seller_name = "Bob";
+    frame_listing.price_cents = 2'500;
+    frame_listing.item = {"minecraft:diamond", 0, exchange::NbtCodec::encode(nbt), "Diamond"};
+    const auto first_listing = service.upsertFrameListing(frame_listing);
+    require(first_listing.id != 0 &&
+                service.findBoundFrameListing(frame_listing.target_key)->id == first_listing.id,
+            "a filled item frame must acquire one durable active listing binding");
+
+    auto hostile_replacement = frame_listing;
+    hostile_replacement.seller_uuid = std::string(Charlie);
+    hostile_replacement.seller_name = "Charlie";
+    bool hostile_update_rejected = false;
+    try {
+        static_cast<void>(service.upsertFrameListing(hostile_replacement));
+    } catch (const std::exception &) {
+        hostile_update_rejected = true;
+    }
+    require(hostile_update_rejected &&
+                service.findBoundFrameListing(frame_listing.target_key)->id == first_listing.id,
+            "another player must not hijack an active frame listing");
+
+    frame_listing.price_cents = 3'000;
+    const auto repriced_listing = service.upsertFrameListing(frame_listing);
+    require(repriced_listing.id != first_listing.id &&
+                service.findFrameListing(first_listing.id)->status == exchange::FrameListingStatus::Canceled,
+            "repricing must create a new generation so an old confirmation cannot buy it");
+    bool stale_confirmation_rejected = false;
+    try {
+        static_cast<void>(service.purchaseFrameListing(first_listing.id, Alice, "Alice", 2'500));
+    } catch (const std::exception &) {
+        stale_confirmation_rejected = true;
+    }
+    require(stale_confirmation_rejected, "a confirmation for a replaced listing must be rejected");
+
+    bool self_purchase_rejected = false;
+    try {
+        static_cast<void>(service.purchaseFrameListing(repriced_listing.id, Bob, "Bob", 3'000));
+    } catch (const std::exception &) {
+        self_purchase_rejected = true;
+    }
+    require(self_purchase_rejected, "a seller must not pay themselves to remove a listing");
+
+    const auto before_frame_buyer = service.balance(Alice);
+    const auto before_frame_seller = service.balance(Bob);
+    const auto purchase = service.purchaseFrameListing(repriced_listing.id, Alice, "Alice", 3'000);
+    require(purchase.listing.status == exchange::FrameListingStatus::Paid &&
+                purchase.buyer_balance_cents == before_frame_buyer - 3'000 &&
+                purchase.seller_balance_cents == before_frame_seller + 3'000,
+            "frame payment must atomically debit the buyer and credit the seller");
+    bool duplicate_purchase_rejected = false;
+    try {
+        static_cast<void>(service.purchaseFrameListing(repriced_listing.id, Charlie, "Charlie", 3'000));
+    } catch (const std::exception &) {
+        duplicate_purchase_rejected = true;
+    }
+    require(duplicate_purchase_rejected && service.balance(Alice) == before_frame_buyer - 3'000 &&
+                service.balance(Bob) == before_frame_seller + 3'000,
+            "replayed or competing confirmations must not charge or credit twice");
+
+    exchange::ExchangeService restarted_frame_service(database, 100'000, 640);
+    const auto unsettled = restarted_frame_service.unsettledFrameListings();
+    require(std::any_of(unsettled.begin(), unsettled.end(), [&](const exchange::FrameListing &listing) {
+                return listing.id == repriced_listing.id && listing.status == exchange::FrameListingStatus::Paid;
+            }),
+            "a paid frame item must remain recoverable after a plugin restart");
+    restarted_frame_service.markFrameListingDropped(repriced_listing.id);
+    restarted_frame_service.markFrameListingDropped(repriced_listing.id);
+    require(restarted_frame_service.findBoundFrameListing(frame_listing.target_key)->status ==
+                exchange::FrameListingStatus::Dropped,
+            "a spawned marked drop must keep the frame protected until pickup");
+    restarted_frame_service.completeFrameListingPickup(repriced_listing.id);
+    restarted_frame_service.completeFrameListingPickup(repriced_listing.id);
+    require(!restarted_frame_service.findBoundFrameListing(frame_listing.target_key).has_value() &&
+                restarted_frame_service.findFrameListing(repriced_listing.id)->status ==
+                    exchange::FrameListingStatus::Claimed,
+            "pickup completion must release the frame exactly once");
+    const auto frame_ledger = database.query(std::format(
+        "SELECT reason,delta_cents FROM exchange_balance_ledger WHERE reference_type='FRAME_LISTING' "
+        "AND reference_id={} ORDER BY id",
+        repriced_listing.id));
+    require(frame_ledger.size() == 2 && exchange::cellString(frame_ledger.front(), 0) == "FRAME_PURCHASE" &&
+                exchange::cellInt64(frame_ledger.front(), 1) == -3'000 &&
+                exchange::cellString(frame_ledger.back(), 0) == "FRAME_SALE" &&
+                exchange::cellInt64(frame_ledger.back(), 1) == 3'000,
+            "frame transfer must leave an immutable balanced ledger pair");
+
+    frame_listing.target_key = "block|overworld|41|70|40";
+    frame_listing.block_x = 41;
+    const auto canceled_listing = service.upsertFrameListing(frame_listing);
+    service.cancelFrameListing(canceled_listing.id, Bob);
+    require(!service.findBoundFrameListing(frame_listing.target_key).has_value() &&
+                service.findFrameListing(canceled_listing.id)->status == exchange::FrameListingStatus::Canceled,
+            "the seller must be able to cancel an unpaid listing without moving money");
+    frame_listing.target_key = "block|overworld|42|70|40";
+    frame_listing.block_x = 42;
+    frame_listing.price_cents = service.balance(Charlie) + 1;
+    const auto unaffordable_listing = service.upsertFrameListing(frame_listing);
+    const auto before_failed_buyer = service.balance(Charlie);
+    const auto before_failed_seller = service.balance(Bob);
+    bool insufficient_frame_balance_rejected = false;
+    try {
+        static_cast<void>(service.purchaseFrameListing(unaffordable_listing.id, Charlie, "Charlie",
+                                                       frame_listing.price_cents));
+    } catch (const std::exception &) {
+        insufficient_frame_balance_rejected = true;
+    }
+    require(insufficient_frame_balance_rejected && service.balance(Charlie) == before_failed_buyer &&
+                service.balance(Bob) == before_failed_seller &&
+                service.findBoundFrameListing(frame_listing.target_key)->status ==
+                    exchange::FrameListingStatus::Active,
+            "insufficient frame payment must roll back the listing and both account balances");
+    service.cancelFrameListing(unaffordable_listing.id, Bob);
 
     bool overflow_rejected = false;
     try {
