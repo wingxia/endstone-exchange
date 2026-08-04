@@ -41,7 +41,7 @@ class ExchangeEventE2EPlugin : public endstone::Plugin {
         }
         if (args.size() != 5) {
             sender.sendErrorMessage(
-                "{}", "Usage: /exchangeevente2e <player> <right|left|exchanger|price_tag> <x> <y> <z>");
+                "{}", "Usage: /exchangeevente2e <player> <right|left|exchanger|price> <x> <y> <z>");
             return true;
         }
         auto *player = getServer().getPlayer(args[0]);
@@ -51,14 +51,14 @@ class ExchangeEventE2EPlugin : public endstone::Plugin {
         const auto z = parseInt(args[4]);
         if (player == nullptr || !x || !y || !z ||
             (action_name != "right" && action_name != "left" && action_name != "exchanger" &&
-             action_name != "price_tag")) {
+             action_name != "price")) {
             sender.sendErrorMessage("{}", "E2E player, action, or coordinates are invalid.");
             return true;
         }
 
         auto block = player->getDimension().getBlockAt(*x, *y, *z);
         std::optional<endstone::ItemStack> item;
-        if (action_name == "exchanger" || action_name == "price_tag") {
+        if (action_name == "exchanger" || action_name == "price") {
             endstone::ItemStack stick(endstone::ItemTypeId("minecraft:stick"), 1);
             auto meta = stick.getItemMeta();
             meta->setDisplayName(action_name);

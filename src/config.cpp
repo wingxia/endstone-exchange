@@ -213,12 +213,7 @@ Config Config::load(const std::filesystem::path &path)
     config.economy.provider = string_value("economy.provider", config.economy.provider);
     std::transform(config.economy.provider.begin(), config.economy.provider.end(), config.economy.provider.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    config.economy.bridge_host = string_value("economy.bridge_host", config.economy.bridge_host);
-    config.economy.bridge_port = integer_value("economy.bridge_port", config.economy.bridge_port);
-    config.economy.bridge_token = string_value("economy.bridge_token", config.economy.bridge_token);
-    config.economy.unit_cents = integer_value("economy.unit_cents", config.economy.unit_cents);
-    config.economy.request_timeout_milliseconds =
-        integer_value("economy.request_timeout_milliseconds", config.economy.request_timeout_milliseconds);
+    config.economy.umoney_plugin = string_value("economy.umoney_plugin", config.economy.umoney_plugin);
     config.economy.recovery_interval_ticks =
         integer_value("economy.recovery_interval_ticks", config.economy.recovery_interval_ticks);
     config.validate();
@@ -255,14 +250,9 @@ frame_capture_delay_ticks = 80
 cleanup_structure_captures = true
 
 [economy]
-# Set provider to "umoney" only after installing the bundled local bridge.
-# UMoney mode requires initial_balance = 0 to avoid minting withdrawable funds.
+# UMoney mode calls the loaded UMoney plugin directly and requires initial_balance = 0.
 provider = "internal"
-bridge_host = "127.0.0.1"
-bridge_port = 8765
-bridge_token = ""
-unit_cents = 100
-request_timeout_milliseconds = 1000
+umoney_plugin = "umoney"
 recovery_interval_ticks = 100
 )config";
 }
@@ -295,18 +285,12 @@ void Config::validate() const
     if (economy.provider != "internal" && economy.provider != "umoney") {
         throw std::runtime_error("economy.provider must be internal or umoney");
     }
-    if (economy.bridge_port == 0 || economy.bridge_port > 65535 || economy.unit_cents <= 0 ||
-        economy.request_timeout_milliseconds < 100 || economy.request_timeout_milliseconds > 10'000 ||
-        economy.recovery_interval_ticks == 0 || economy.recovery_interval_ticks > 72'000) {
-        throw std::runtime_error("economy bridge limits are invalid");
+    if (economy.recovery_interval_ticks == 0 || economy.recovery_interval_ticks > 72'000) {
+        throw std::runtime_error("economy recovery interval is invalid");
     }
     if (economy.usesUmoney()) {
-        if (economy.bridge_host != "127.0.0.1" && economy.bridge_host != "::1" &&
-            economy.bridge_host != "localhost") {
-            throw std::runtime_error("UMoney bridge must use a loopback host");
-        }
-        if (economy.bridge_token.size() < 32 || economy.bridge_token.find_first_of("\r\n") != std::string::npos) {
-            throw std::runtime_error("UMoney bridge token must contain at least 32 characters and no newlines");
+        if (economy.umoney_plugin.empty() || economy.umoney_plugin.find_first_of("\r\n") != std::string::npos) {
+            throw std::runtime_error("economy.umoney_plugin must name a loaded plugin");
         }
         if (market.initial_balance_cents != 0) {
             throw std::runtime_error("UMoney mode requires market.initial_balance = 0");

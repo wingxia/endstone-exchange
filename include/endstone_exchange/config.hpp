@@ -29,11 +29,7 @@ struct MarketConfig {
 
 struct EconomyConfig {
     std::string provider{"internal"};
-    std::string bridge_host{"127.0.0.1"};
-    unsigned int bridge_port{8765};
-    std::string bridge_token;
-    std::int64_t unit_cents{100};
-    unsigned int request_timeout_milliseconds{1000};
+    std::string umoney_plugin{"umoney"};
     std::uint64_t recovery_interval_ticks{100};
 
     [[nodiscard]] bool usesUmoney() const noexcept { return provider == "umoney"; }

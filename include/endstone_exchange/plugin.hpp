@@ -79,11 +79,12 @@ class ExchangePlugin : public endstone::Plugin {
     std::shared_ptr<endstone::Task> economy_task_;
     std::shared_ptr<endstone::Task> frame_recovery_task_;
     std::shared_ptr<HologramSnapshotState> hologram_snapshot_state_;
-    std::unique_ptr<UmoneyTransferWorker> economy_worker_;
+    std::unique_ptr<UmoneyGateway> umoney_gateway_;
+    bool processing_economy_{false};
     bool ready_{false};
 
     [[nodiscard]] bool isExchanger(const std::optional<endstone::ItemStack> &item) const;
-    [[nodiscard]] bool isPriceTag(const std::optional<endstone::ItemStack> &item) const;
+    [[nodiscard]] bool isPriceStick(const std::optional<endstone::ItemStack> &item) const;
     [[nodiscard]] bool canAdmin(endstone::Player &player) const;
     [[nodiscard]] std::string blockTargetKey(const endstone::Block &block) const;
     [[nodiscard]] std::string actorTargetKey(const endstone::Actor &actor) const;
@@ -103,7 +104,7 @@ class ExchangePlugin : public endstone::Plugin {
     void completeItemFrameCapture(FrameAddress address, std::string structure_name, std::string level_name,
                                   std::string player_uuid, std::string player_name,
                                   FrameCaptureCallback callback, int attempt);
-    void handlePriceTag(endstone::Player &player, endstone::Block &block);
+    void handlePriceStick(endstone::Player &player, endstone::Block &block);
     void queueFramePriceCapture(endstone::Player &player, FrameAddress address,
                                 std::optional<FrameListing> existing = std::nullopt);
     void openFrameManagementForm(endstone::Player &player, const FrameListing &listing);
@@ -143,9 +144,11 @@ class ExchangePlugin : public endstone::Plugin {
     void giveExchanger(endstone::Player &player);
     void localizeExchangers(endstone::Player &player);
     void processEconomyTransfers();
-    void queueEconomyTransfer(const EconomyTransfer &transfer);
-    void notifyEconomyTransfer(const EconomyTransfer &transfer, Cents exchange_balance, bool completed,
-                               std::string_view error_code = {}, std::string_view error = {});
+    [[nodiscard]] bool processEconomyTransfer(const EconomyTransfer &transfer, bool throw_on_failure = false);
+    [[nodiscard]] Cents spendableBalance(std::string_view player_uuid, std::string_view player_name);
+    void fundDirectBalance(std::string_view player_uuid, std::string_view player_name, Cents required_cents,
+                           Language language);
+    void sweepDirectBalances();
 
     void refreshHolograms();
     void refreshHologram(const Market &market);

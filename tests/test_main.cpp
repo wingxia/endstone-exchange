@@ -10,6 +10,7 @@
 #include "endstone_exchange/nbt_codec.hpp"
 #include "endstone_exchange/structure_reader.hpp"
 #include "endstone_exchange/trade_form.hpp"
+#include "endstone_exchange/umoney_gateway.hpp"
 
 #include <algorithm>
 #include <array>
@@ -114,10 +115,9 @@ void testConfig() {
                 config.market.price_step_cents == 100,
             "whole-u price range parsing");
     require(config.market.frame_capture_delay_ticks == 80, "item-frame capture delay");
-    require(config.economy.provider == "internal" && config.economy.unit_cents == 100,
-            "internal economy defaults");
+    require(config.economy.provider == "internal" && config.economy.umoney_plugin == "umoney",
+            "direct economy defaults");
     config.economy.provider = "umoney";
-    config.economy.bridge_token = "0123456789abcdef0123456789abcdef";
     config.market.initial_balance_cents = 0;
     config.validate();
     bool rejected_umoney_mint = false;
@@ -130,6 +130,35 @@ void testConfig() {
     require(rejected_umoney_mint, "UMoney mode must reject minted initial balances");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+}
+
+void testUmoneyRecoveryDecision() {
+    using exchange::EconomyTransferDirection;
+    using exchange::UmoneyMutationDecision;
+    using exchange::decideUmoneyMutation;
+
+    require(decideUmoneyMutation(EconomyTransferDirection::Deposit, 10, 100, 100) ==
+                UmoneyMutationDecision::Apply,
+            "a direct debit at its baseline is safe to apply");
+    require(decideUmoneyMutation(EconomyTransferDirection::Deposit, 10, 100, 90) ==
+                UmoneyMutationDecision::AlreadyApplied,
+            "a recovered direct debit must recognize its expected balance");
+    require(decideUmoneyMutation(EconomyTransferDirection::Deposit, 10, 100, 95) ==
+                UmoneyMutationDecision::Conflict,
+            "an unexpected direct-debit balance must be blocked");
+    require(decideUmoneyMutation(EconomyTransferDirection::Deposit, 10, 5, 5) ==
+                UmoneyMutationDecision::Insufficient,
+            "a direct debit must reject insufficient UMoney funds without mutation");
+    require(decideUmoneyMutation(EconomyTransferDirection::Withdraw, 10, 100, 100) ==
+                UmoneyMutationDecision::Apply &&
+                decideUmoneyMutation(EconomyTransferDirection::Withdraw, 10, 100, 110) ==
+                    UmoneyMutationDecision::AlreadyApplied,
+            "direct credits must distinguish pending and already-applied states");
+    require(decideUmoneyMutation(EconomyTransferDirection::Withdraw, 1,
+                                 std::numeric_limits<std::int64_t>::max(),
+                                 std::numeric_limits<std::int64_t>::max()) ==
+                UmoneyMutationDecision::Conflict,
+            "an overflowing direct credit must be blocked");
 }
 
 void testTradeFormFlow() {
@@ -702,12 +731,21 @@ void testDatabaseIntegration() {
         "AND TABLE_NAME='exchange_markets' AND COLUMN_NAME='reopenable'");
     require(reopenable_column.size() == 1, "version 5 upgrade must add the reopenable market column");
     database.migrate();
+    database.execute("DELETE FROM exchange_schema_versions WHERE version=10");
+    database.execute("ALTER TABLE exchange_economy_transfers DROP COLUMN external_balance_before_units");
+    database.migrate();
     const auto schema_version = database.query("SELECT MAX(version) FROM exchange_schema_versions");
-    require(exchange::cellInt(schema_version.front(), 0) == 9, "database migrations must be idempotent at version 9");
+    require(exchange::cellInt(schema_version.front(), 0) == 10,
+            "database migrations must be idempotent at version 10");
     const auto economy_schema = database.query(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "AND TABLE_NAME='exchange_economy_transfers' AND COLUMN_NAME='amount_units'");
     require(economy_schema.size() == 1, "version 8 must create durable UMoney transfer storage");
+    const auto direct_economy_schema = database.query(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
+        "AND TABLE_NAME='exchange_economy_transfers' AND COLUMN_NAME='external_balance_before_units'");
+    require(direct_economy_schema.size() == 1,
+            "version 10 must persist the pre-call UMoney balance for crash recovery");
     const auto frame_listing_schema = database.query(
         "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() "
         "AND TABLE_NAME='exchange_frame_listings' AND COLUMN_NAME='status'");
@@ -762,12 +800,20 @@ void testDatabaseIntegration() {
     service.ensureAccount(Alice, "Alice");
     service.ensureAccount(Bob, "Bob");
     service.ensureAccount(Charlie, "Charlie");
+    const auto positive_balances = service.positiveBalances();
+    require(positive_balances.size() == 3 &&
+                std::all_of(positive_balances.begin(), positive_balances.end(),
+                            [](const exchange::AccountBalance &account) {
+                                return account.balance_cents == 100'000 && !account.player_name.empty();
+                            }),
+            "direct settlement must enumerate every whole-unit positive account balance");
 
     const auto deposit = service.prepareEconomyTransfer(
-        Alice, "Alice", exchange::EconomyTransferDirection::Deposit, 1'000, 10);
+        Alice, "Alice", exchange::EconomyTransferDirection::Deposit, 1'000, 10, 1'000);
     require(deposit.status == exchange::EconomyTransferStatus::Prepared &&
-                deposit.amount_units == 10 && service.balance(Alice) == 100'000,
-            "deposit preparation must persist exact external units without minting exchange funds");
+                deposit.amount_units == 10 && deposit.external_balance_before_units == 1'000 &&
+                service.balance(Alice) == 100'000,
+            "deposit preparation must persist exact external units and baseline without minting exchange funds");
     service.markEconomyTransferExternalApplied(deposit.id, 990);
     service.markEconomyTransferExternalApplied(deposit.id, 990);
     require(service.completeEconomyTransfer(deposit.id) == 101'000 &&
@@ -775,7 +821,7 @@ void testDatabaseIntegration() {
             "an externally applied deposit must credit exactly once");
 
     const auto withdrawal = service.prepareEconomyTransfer(
-        Alice, "Alice", exchange::EconomyTransferDirection::Withdraw, 1'000, 10);
+        Alice, "Alice", exchange::EconomyTransferDirection::Withdraw, 1'000, 10, 990);
     require(service.balance(Alice) == 100'000,
             "withdrawal preparation must reserve exchange funds before touching UMoney");
     exchange::ExchangeService restarted_after_prepare(database, 100'000, 640);
@@ -784,7 +830,8 @@ void testDatabaseIntegration() {
                         [&](const exchange::EconomyTransfer &transfer) {
                             return transfer.id == withdrawal.id &&
                                    transfer.status == exchange::EconomyTransferStatus::Prepared &&
-                                   transfer.amount_units == 10;
+                                   transfer.amount_units == 10 &&
+                                   transfer.external_balance_before_units == 990;
                         }),
             "a prepared withdrawal must remain recoverable after restart");
     restarted_after_prepare.markEconomyTransferExternalApplied(withdrawal.id, 1'000);
@@ -792,26 +839,26 @@ void testDatabaseIntegration() {
             "withdrawal completion must not debit reserved funds twice");
 
     const auto failed_withdrawal = service.prepareEconomyTransfer(
-        Bob, "Bob", exchange::EconomyTransferDirection::Withdraw, 700, 7);
+        Bob, "Bob", exchange::EconomyTransferDirection::Withdraw, 700, 7, 100);
     require(service.balance(Bob) == 99'300, "failed-withdrawal test must begin with a durable reserve");
     require(service.failEconomyTransfer(failed_withdrawal.id, "not applied") == 100'000 &&
                 service.failEconomyTransfer(failed_withdrawal.id, "not applied") == 100'000,
             "a definitely unapplied withdrawal must refund exactly once");
 
     const auto crash_deposit = service.prepareEconomyTransfer(
-        Charlie, "Charlie", exchange::EconomyTransferDirection::Deposit, 500, 5);
+        Charlie, "Charlie", exchange::EconomyTransferDirection::Deposit, 500, 5, 500);
     service.markEconomyTransferExternalApplied(crash_deposit.id, 495);
     exchange::ExchangeService restarted_after_external_apply(database, 100'000, 640);
     require(restarted_after_external_apply.completeEconomyTransfer(crash_deposit.id) == 100'500,
             "restart recovery must finish a deposit whose external side was already applied");
     const auto balancing_withdrawal = restarted_after_external_apply.prepareEconomyTransfer(
-        Charlie, "Charlie", exchange::EconomyTransferDirection::Withdraw, 500, 5);
+        Charlie, "Charlie", exchange::EconomyTransferDirection::Withdraw, 500, 5, 495);
     restarted_after_external_apply.markEconomyTransferExternalApplied(balancing_withdrawal.id, 500);
     require(restarted_after_external_apply.completeEconomyTransfer(balancing_withdrawal.id) == 100'000,
             "deposit and withdrawal round trip must conserve exchange funds");
 
     const auto blocked_deposit = service.prepareEconomyTransfer(
-        Bob, "Bob", exchange::EconomyTransferDirection::Deposit, 100, 1);
+        Bob, "Bob", exchange::EconomyTransferDirection::Deposit, 100, 1, 100);
     service.blockEconomyTransfer(blocked_deposit.id, "manual reconciliation required");
     require(service.findEconomyTransfer(blocked_deposit.id)->status ==
                 exchange::EconomyTransferStatus::Blocked &&
@@ -869,8 +916,11 @@ void testDatabaseIntegration() {
                 top_books.at(market.id).asks.front().quantity == 5,
             "batched top-of-book snapshot");
 
-    auto buy = service.placeOrder(
-        {market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Market, 0, 3});
+    const exchange::OrderRequest market_buy_request{
+        market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Market, 0, 3};
+    require(service.buyFundingRequired(market_buy_request) == 300,
+            "market-buy direct funding must use the currently matched asks");
+    auto buy = service.placeOrder(market_buy_request);
     require(buy.filled_quantity == 3 && buy.gross_cents == 300, "market buy execution");
     require(service.balance(Alice) == 99'700, "market buyer debit");
     require(service.balance(Bob) == 100'300, "market seller credit");
@@ -902,8 +952,11 @@ void testDatabaseIntegration() {
     require(service.pendingDeliveries(Alice).front().claimed_quantity == 2,
             "claim prepared before a crash can be safely released when no tagged item exists");
 
-    auto bid = service.placeOrder(
-        {market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Limit, 120, 4});
+    const exchange::OrderRequest limit_buy_request{
+        market.id, std::string(Alice), "Alice", exchange::Side::Buy, exchange::OrderType::Limit, 120, 4};
+    require(service.buyFundingRequired(limit_buy_request) == 480,
+            "limit-buy direct funding must cover the full durable reserve");
+    auto bid = service.placeOrder(limit_buy_request);
     require(bid.filled_quantity == 2 && bid.open_quantity == 2, "crossing limit buy and resting remainder");
     require(service.balance(Alice) == 99'260, "limit reserve plus price-improvement refund");
     service.cancelOrder(bid.order_id, Alice);
@@ -1412,6 +1465,7 @@ int main() {
         testNbtCodec();
         testDeliveryMarkerCleanup();
         testConfig();
+        testUmoneyRecoveryDecision();
         testTradeFormFlow();
         testLocalization();
         testInteractionGate();

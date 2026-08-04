@@ -11,9 +11,12 @@ on a production server.
   submit scripted form responses.
 - `endstone_driver/` builds a temporary Python plugin whose `exchangee2e`
   command dispatches a small allowlist of Exchange commands as an online player.
+  Its `umoneye2e` command uses UMoney's public API for isolated balance setup,
+  and `umoneyfaulte2e arm` kills the process immediately after the next durable
+  UMoney mutation to verify Exchange's pre-call balance recovery.
 - `endstone_event_driver.cpp` builds a temporary C++ plugin whose
   `exchangeevente2e` command raises a real left/right `PlayerInteractEvent` for
-  a selected block and can supply synthetic `exchanger` or `price_tag` sticks.
+  a selected block and can supply synthetic `exchanger` or `price` sticks.
 
 The drivers assume an isolated offline-mode server, a disposable database, and a
 dedicated `screen` session. Back up the test server before fault injection.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(endstone_exchange VERSION 1.8.0 LANGUAGES CXX)
+project(endstone_exchange VERSION 1.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(endstone)
 
+set(PYBIND11_FINDPYTHON ON)
+FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG v3.0.1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(pybind11)
+
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb)
@@ -44,11 +53,11 @@ set(EXCHANGE_CORE_SOURCES
     src/localization.cpp
     src/market_display.cpp
     src/trade_form.cpp
-    src/umoney_gateway.cpp
 )
 
 endstone_add_plugin(exchange
     src/plugin.cpp
+    src/umoney_gateway.cpp
     src/inventory_escrow.cpp
     src/nbt_codec.cpp
     src/structure_reader.cpp
@@ -58,7 +67,7 @@ target_include_directories(exchange PRIVATE
     include
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
-target_link_libraries(exchange PRIVATE PkgConfig::MARIADB Threads::Threads)
+target_link_libraries(exchange PRIVATE PkgConfig::MARIADB Threads::Threads pybind11::embed)
 target_compile_options(exchange PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(exchange PROPERTIES SKIP_BUILD_RPATH TRUE)
 

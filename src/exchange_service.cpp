@@ -192,6 +192,22 @@ Cents ExchangeService::balance(const std::string_view player_uuid) {
     return cellInt64(rows.front(), 0);
 }
 
+std::vector<AccountBalance> ExchangeService::positiveBalances(const int limit) {
+    if (limit <= 0 || limit > 100) {
+        throw std::runtime_error("positive-balance query limit must be between 1 and 100");
+    }
+    const auto rows = database_.query(std::format(
+        "SELECT player_uuid,player_name,balance_cents FROM exchange_accounts "
+        "WHERE balance_cents>=100 ORDER BY updated_at,player_uuid LIMIT {}",
+        limit));
+    std::vector<AccountBalance> result;
+    result.reserve(rows.size());
+    for (const auto &row : rows) {
+        result.push_back({cellString(row, 0), cellString(row, 1), cellInt64(row, 2)});
+    }
+    return result;
+}
+
 Cents ExchangeService::addBalance(const std::string_view player_uuid, const std::string_view player_name,
                                   const Cents delta_cents) {
     ensureAccount(player_uuid, player_name);
@@ -1044,10 +1060,12 @@ std::optional<SellEscrow> ExchangeService::findSellEscrow(const Id escrow_id,
 }
 
 EconomyTransfer ExchangeService::prepareEconomyTransfer(const std::string_view player_uuid,
-                                                        const std::string_view player_name,
-                                                        const EconomyTransferDirection direction,
-                                                        const Cents amount_cents,
-                                                        const std::int64_t amount_units) {
+                                                         const std::string_view player_name,
+                                                         const EconomyTransferDirection direction,
+                                                         const Cents amount_cents,
+                                                         const std::int64_t amount_units,
+                                                         const std::optional<std::int64_t>
+                                                             external_balance_before_units) {
     if (player_uuid.empty() || player_name.empty()) {
         throw std::runtime_error("economy transfer identity is incomplete");
     }
@@ -1057,12 +1075,13 @@ EconomyTransfer ExchangeService::prepareEconomyTransfer(const std::string_view p
     ensureAccount(player_uuid, player_name);
 
     Transaction transaction(database_);
+    const auto baseline = external_balance_before_units ? std::to_string(*external_balance_before_units) : "NULL";
     database_.execute(std::format(
         "INSERT INTO exchange_economy_transfers("
-        "operation_key,player_uuid,player_name,direction,amount_cents,amount_units) "
-        "VALUES (UUID(),{},{},{},{},{})",
+        "operation_key,player_uuid,player_name,direction,amount_cents,amount_units,"
+        "external_balance_before_units) VALUES (UUID(),{},{},{},{},{},{})",
         database_.quote(player_uuid), database_.quote(player_name), database_.quote(toSql(direction)), amount_cents,
-        amount_units));
+        amount_units, baseline));
     const auto transfer_id = static_cast<Id>(database_.lastInsertId());
     if (direction == EconomyTransferDirection::Withdraw) {
         debit(player_uuid, amount_cents, "UMONEY_WITHDRAW_RESERVED", "ECONOMY_TRANSFER", transfer_id);
@@ -1081,8 +1100,9 @@ std::vector<EconomyTransfer> ExchangeService::pendingEconomyTransfers(const int 
         throw std::runtime_error("economy transfer query limit must be between 1 and 100");
     }
     const auto rows = database_.query(std::format(
-        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,external_balance_units,"
-        "attempt_count,COALESCE(last_error,'') FROM exchange_economy_transfers "
+        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,"
+        "external_balance_before_units,external_balance_units,attempt_count,COALESCE(last_error,'') "
+        "FROM exchange_economy_transfers "
         "WHERE status IN ('PREPARED','EXTERNAL_APPLIED') ORDER BY id LIMIT {}",
         limit));
     std::vector<EconomyTransfer> result;
@@ -1095,8 +1115,9 @@ std::vector<EconomyTransfer> ExchangeService::pendingEconomyTransfers(const int 
 
 std::optional<EconomyTransfer> ExchangeService::findEconomyTransfer(const Id transfer_id) {
     const auto rows = database_.query(std::format(
-        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,external_balance_units,"
-        "attempt_count,COALESCE(last_error,'') FROM exchange_economy_transfers WHERE id={}",
+        "SELECT id,operation_key,player_uuid,player_name,direction,amount_cents,amount_units,status,"
+        "external_balance_before_units,external_balance_units,attempt_count,COALESCE(last_error,'') "
+        "FROM exchange_economy_transfers WHERE id={}",
         transfer_id));
     return rows.empty() ? std::nullopt : std::optional<EconomyTransfer>(economyTransferFromRow(rows.front()));
 }
@@ -1280,6 +1301,44 @@ FrameListing ExchangeService::upsertFrameListing(const FrameListing &listing, co
         database_.quote(result.target_key), result.id));
     transaction.commit();
     return result;
+}
+
+Cents ExchangeService::buyFundingRequired(const OrderRequest &request) {
+    validateRequest(request);
+    if (request.side != Side::Buy) {
+        throw std::runtime_error("only buy orders require currency funding");
+    }
+    const auto market = database_.query(
+        std::format("SELECT book_id,active FROM exchange_markets WHERE id={}", request.market_id));
+    if (market.empty() || cellInt(market.front(), 1) == 0) {
+        throw std::runtime_error("market is not active");
+    }
+    if (request.type == OrderType::Limit) {
+        return checkedProduct(request.price_cents, request.quantity);
+    }
+
+    const auto book_id = static_cast<Id>(cellInt64(market.front(), 0));
+    const auto asks = database_.query(std::format(
+        "SELECT o.price_cents,o.remaining_qty FROM exchange_orders o "
+        "JOIN exchange_markets m ON m.id=o.market_id WHERE m.book_id={} AND o.side='SELL' "
+        "AND o.order_type='LIMIT' AND o.status IN ('OPEN','PARTIAL') AND o.player_uuid<>{} "
+        "ORDER BY o.price_cents ASC,o.id ASC",
+        book_id, database_.quote(request.player_uuid)));
+    int remaining = request.quantity;
+    Cents required = 0;
+    for (const auto &ask : asks) {
+        if (remaining == 0) {
+            break;
+        }
+        const auto fill = std::min(remaining, cellInt(ask, 1));
+        const auto cost = checkedProduct(cellInt64(ask, 0), fill);
+        if (required > std::numeric_limits<Cents>::max() - cost) {
+            throw std::runtime_error("market-buy funding is too large");
+        }
+        required += cost;
+        remaining -= fill;
+    }
+    return required;
 }
 
 std::optional<FrameListing> ExchangeService::findBoundFrameListing(const std::string_view target_key) {
@@ -1479,9 +1538,10 @@ EconomyTransfer ExchangeService::economyTransferFromRow(const QueryRow &row) {
     result.amount_cents = cellInt64(row, 5);
     result.amount_units = cellInt64(row, 6);
     result.status = economyTransferStatus(cellString(row, 7));
-    result.external_balance_units = optionalInt64(row, 8);
-    result.attempt_count = cellInt(row, 9);
-    result.last_error = cellString(row, 10);
+    result.external_balance_before_units = optionalInt64(row, 8);
+    result.external_balance_units = optionalInt64(row, 9);
+    result.attempt_count = cellInt(row, 10);
+    result.last_error = cellString(row, 11);
     return result;
 }
 

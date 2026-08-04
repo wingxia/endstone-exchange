@@ -125,9 +125,16 @@ struct EconomyTransfer {
     Cents amount_cents{0};
     std::int64_t amount_units{0};
     EconomyTransferStatus status{EconomyTransferStatus::Prepared};
+    std::optional<std::int64_t> external_balance_before_units;
     std::optional<std::int64_t> external_balance_units;
     int attempt_count{0};
     std::string last_error;
+};
+
+struct AccountBalance {
+    std::string player_uuid;
+    std::string player_name;
+    Cents balance_cents{0};
 };
 
 struct FrameListing {

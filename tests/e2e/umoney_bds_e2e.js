@@ -20,11 +20,8 @@ const formResponses = (process.env.E2E_FORM_RESPONSES || '')
 const commands = (process.env.E2E_COMMANDS || [
   '/exchange balance',
   '/exchange status',
-  '/exchange deposit 100',
-  '/exchange balance',
-  '/exchange withdraw 40',
-  '/exchange balance',
-  `/exchange addbalance ${username} 10`
+  '/exchange orders',
+  '/exchange claim'
 ].join('\n')).split('\n').map(value => value.trim()).filter(Boolean)
 
 const stableUuid = value => {

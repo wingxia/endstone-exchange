@@ -16,6 +16,7 @@ class ExchangeService {
 
     void ensureAccount(std::string_view player_uuid, std::string_view player_name);
     [[nodiscard]] Cents balance(std::string_view player_uuid);
+    [[nodiscard]] std::vector<AccountBalance> positiveBalances(int limit = 100);
     Cents addBalance(std::string_view player_uuid, std::string_view player_name, Cents delta_cents);
 
     [[nodiscard]] Market activateMarket(const Market &market);
@@ -26,6 +27,7 @@ class ExchangeService {
     [[nodiscard]] std::vector<Market> activeMarkets();
 
     [[nodiscard]] OrderBook orderBook(Id market_id, int depth);
+    [[nodiscard]] Cents buyFundingRequired(const OrderRequest &request);
     [[nodiscard]] std::unordered_map<Id, OrderBook> topOfBooks(const std::vector<Id> &market_ids);
     [[nodiscard]] ExecutionResult placeOrder(const OrderRequest &request);
     void cancelOrder(Id order_id, std::string_view player_uuid, bool administrator = false);
@@ -48,7 +50,9 @@ class ExchangeService {
 
     [[nodiscard]] EconomyTransfer prepareEconomyTransfer(std::string_view player_uuid, std::string_view player_name,
                                                          EconomyTransferDirection direction, Cents amount_cents,
-                                                         std::int64_t amount_units);
+                                                         std::int64_t amount_units,
+                                                         std::optional<std::int64_t> external_balance_before_units =
+                                                             std::nullopt);
     [[nodiscard]] std::vector<EconomyTransfer> pendingEconomyTransfers(int limit = 16);
     [[nodiscard]] std::optional<EconomyTransfer> findEconomyTransfer(Id transfer_id);
     void recordEconomyTransferAttempt(Id transfer_id, std::string_view error);
