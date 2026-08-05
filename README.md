@@ -2,6 +2,9 @@
 
 Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式版本为 **1.9.0**，支持世界交易点、展示框一口价交易、完整 NBT 物品、MySQL 持久化和 UMoney 资金系统。
 
+- 正式版本：[v1.9.0](https://github.com/wingxia/endstone-exchange/releases/tag/v1.9.0)
+- 构建状态：[main CI](https://github.com/wingxia/endstone-exchange/actions/workflows/ci.yml?query=branch%3Amain)
+
 ## 兼容性
 
 | 组件 | 版本 |
@@ -83,12 +86,19 @@ recovery_interval_ticks = 100
 
 ## 安装
 
-1. 安装 UMoney 260602 正式 wheel。
-2. 将 `endstone_exchange.so` 放入服务端 `plugins/`。
-3. 启动一次服务端，生成 `plugins/exchange/config.toml`。
-4. 配置 MySQL，并按上方示例启用 UMoney。
-5. 将配置文件权限限制为服务账号可读，例如 `chmod 600 plugins/exchange/config.toml`。
-6. 重启服务端并执行 `exchange status`。
+1. 从 [v1.9.0 Release](https://github.com/wingxia/endstone-exchange/releases/tag/v1.9.0) 下载 `endstone_exchange-v1.9.0-linux-x86_64.so`。
+2. 校验发布文件：
+
+   ```bash
+   echo "f4f0e6229ca17c55f409d46878bd75ce00c3652510756bbb4dbacc791b7f2690  endstone_exchange-v1.9.0-linux-x86_64.so" | sha256sum --check
+   ```
+
+3. 安装 UMoney 260602 正式 wheel。
+4. 将发布文件复制到服务端 `plugins/endstone_exchange.so`。
+5. 启动一次服务端，生成 `plugins/exchange/config.toml`。
+6. 配置 MySQL，并按上方示例启用 UMoney。
+7. 将配置文件权限限制为服务账号可读，例如 `chmod 600 plugins/exchange/config.toml`。
+8. 重启服务端并执行 `exchange status`，确认 Exchange `1.9.0`、UMoney `260602` 和数据库均可用。
 
 完整配置模板位于 [config/config.example.toml](config/config.example.toml)。
 
