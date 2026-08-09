@@ -17,17 +17,17 @@ Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式�
 
 ## 展示框一口价交易
 
-1. 玩家在铁砧中把普通木棍精确命名为 `price`。
+1. 所有玩家都可以在铁砧中把普通木棍精确命名为 `price`，不需要管理权限。
 2. 玩家手持 `price` 右击装有物品的展示框，填写 `1` 到 `5000` 的整数 `u` 价格。
 3. 卖家或 OP 可再次右击该展示框修改价格或取消挂牌。
 4. 买家左击已挂牌展示框，核对物品、卖家、价格和余额后确认付款。
 5. 付款成功后，展示框内物品以完整 NBT 掉落。
 
-`price` 对所有玩家开放，不需要管理权限。挂牌期间展示框物品不能旋转、破坏，也不会被爆炸破坏。余额不足、物品被替换、重复确认或多人同时确认时不会产生重复扣款或重复成交。
+挂牌期间展示框物品不能旋转、破坏，也不会被爆炸破坏。余额不足、物品被替换、重复确认或多人同时确认时不会产生重复扣款或重复成交。
 
 ## 世界交易点
 
-- 只有 OP 可以使用精确命名为 `exchanger` 的木棍创建或关闭交易点。
+- OP 使用精确命名为 `exchanger` 的木棍创建或关闭交易点。
 - 方块、掉落物、展示框和可映射实体均可作为交易目标。
 - 玩家右击交易点即可查看订单簿、余额和可出售数量。
 - 支持限价买入、限价卖出、直接购买和直接出售。
@@ -37,18 +37,11 @@ Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式�
 
 ## UMoney
 
-UMoney 模式固定使用以下换算：
+Exchange 在 Endstone 主线程直接调用 UMoney 的 `api_get_player_money` 和 `api_change_player_money`，读取和修改 UMoney 的整数余额。订单和交易临时余额在 Exchange 内部按交易分保存，金额单位为 `1 UMoney = 1u = 100 交易分`。玩家不需要手动换算或划转资金。
 
-```text
-1 UMoney = 1u = 100 交易分
-```
-
-Exchange 在 Endstone 主线程调用 UMoney 的 `api_get_player_money` 和 `api_change_player_money`：
-
-- 购买时自动从 UMoney 取得所需资金并完成扣款。
-- 卖家所得自动结算到 UMoney。
-- 订单取消、价格改善和失败交易的退款自动返回 UMoney。
-- 充值、结算和提现由交易流程自动完成，玩家不需要资金操作命令。
+- 可用余额为 UMoney 余额和交易临时余额的合计；购买时按需直接扣减 UMoney 的整数余额。
+- 卖家所得、订单取消、价格改善和失败交易的退款自动结算到 UMoney。
+- 不足 1 UMoney 的交易临时余额按交易分保留，累计到整数单位后自动结算到 UMoney。
 - UMoney 模式下 `/exchange addbalance` 不可用。
 
 推荐配置：
@@ -66,7 +59,7 @@ recovery_interval_ticks = 100
 ## 数据与恢复
 
 - MySQL/InnoDB 保存账户、交易点、订单、成交记录、待领取物品和不可变资金账本。
-- UMoney 转账保存调用前余额、目标余额和执行状态；重启恢复会区分未执行、已执行和余额冲突。
+- UMoney 余额变更保存调用前余额、目标余额和执行状态；重启恢复会区分未执行、已执行和余额冲突。
 - 展示框成交使用持久化状态机，服务器中断后可继续完成扣款、清空展示框和生成唯一掉落物。
 - 买入交付和卖出暂存使用可恢复状态，玩家离线或背包已满时物品保存在待领取队列。
 - 物品匹配与交付包含类型、数据值、自定义名称、说明、附魔、耐久和确定性编码的完整 NBT。
@@ -76,13 +69,13 @@ recovery_interval_ticks = 100
 | 命令 | 权限 | 作用 |
 | --- | --- | --- |
 | `/exchange give [在线玩家]` | `exchange.admin` | 发放名为 `exchanger` 的木棍 |
-| `/exchange balance` | `exchange.use` | 查询 UMoney 与交易临时余额 |
+| `/exchange balance` | `exchange.use` | 查询可用余额（UMoney 与交易临时余额合计） |
 | `/exchange orders` | `exchange.use` | 查看并取消自己的未完成订单 |
 | `/exchange claim` | `exchange.use` | 领取暂存物品 |
-| `/exchange addbalance <玩家> <金额>` | `exchange.admin` | 调整内部经济余额 |
+| `/exchange addbalance <玩家> <金额>` | `exchange.admin` | 调整内部经济余额（UMoney 模式不可用） |
 | `/exchange status` | `exchange.use` | 检查数据库、市场、资金操作和恢复队列 |
 
-`exchange.use` 默认授予所有玩家，`exchange.admin` 默认授予 OP。创建世界交易点还会检查玩家的 OP 状态。
+`exchange.use` 默认授予所有玩家，`exchange.admin` 默认授予 OP。
 
 ## 安装
 
