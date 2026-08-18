@@ -117,6 +117,8 @@ void testConfig() {
     require(config.market.frame_capture_delay_ticks == 80, "item-frame capture delay");
     require(config.economy.provider == "internal" && config.economy.umoney_plugin == "umoney",
             "direct economy defaults");
+    require(!config.protection.enabled && !config.protection.contains("Overworld", 0, 0, 0),
+            "protection must stay disabled in the generated template");
     config.economy.provider = "umoney";
     config.market.initial_balance_cents = 0;
     config.validate();
@@ -128,8 +130,49 @@ void testConfig() {
         rejected_umoney_mint = true;
     }
     require(rejected_umoney_mint, "UMoney mode must reject minted initial balances");
+
+    const auto protected_path =
+        std::filesystem::temp_directory_path() / "endstone-exchange-protection-config-test.toml";
+    {
+        std::ofstream output(protected_path, std::ios::trunc);
+        output << R"config([protection]
+enabled = true
+dimension = "overworld"
+point1_x = 12
+point1_y = 80
+point1_z = 4
+point2_x = -2
+point2_y = 60
+point2_z = -8
+)config";
+    }
+    const auto protected_config = exchange::Config::load(protected_path);
+    require(protected_config.protection.contains("Overworld", -2, 60, -8) &&
+                protected_config.protection.contains("OVERWORLD", 12, 80, 4) &&
+                protected_config.protection.contains("overworld", 0, 70, 0),
+            "protection must normalize reversed points and include every boundary");
+    require(!protected_config.protection.contains("Nether", 0, 70, 0) &&
+                !protected_config.protection.contains("Overworld", 13, 70, 0) &&
+                !protected_config.protection.contains("Overworld", 0, 81, 0),
+            "protection must reject other dimensions and coordinates outside the cuboid");
+
+    const auto incomplete_path =
+        std::filesystem::temp_directory_path() / "endstone-exchange-incomplete-protection-test.toml";
+    {
+        std::ofstream output(incomplete_path, std::ios::trunc);
+        output << "[protection]\nenabled = true\ndimension = \"Overworld\"\npoint1_x = 1\n";
+    }
+    bool rejected_incomplete_protection = false;
+    try {
+        static_cast<void>(exchange::Config::load(incomplete_path));
+    } catch (const std::exception &) {
+        rejected_incomplete_protection = true;
+    }
+    require(rejected_incomplete_protection, "enabled protection must require both complete points");
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+    std::filesystem::remove(protected_path, ignored);
+    std::filesystem::remove(incomplete_path, ignored);
 }
 
 void testUmoneyRecoveryDecision() {

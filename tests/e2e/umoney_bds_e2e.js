@@ -86,11 +86,16 @@ const sendCommand = command => {
     if (!screenSession) {
       throw new Error('E2E_SCREEN_SESSION is required for console_driver mode')
     }
-    const match = command.match(/^\/?exchange(?:\s+(.*))?$/)
-    if (!match || !match[1]) {
-      throw new Error(`console_driver only accepts /exchange commands: ${command}`)
+    const exchangeMatch = command.match(/^\/?exchange(?:\s+(.*))?$/)
+    const eventMatch = command.match(/^\/?exchangeevente2e(?:\s+(.*))?$/)
+    let line
+    if (exchangeMatch && exchangeMatch[1]) {
+      line = `exchangee2e ${username} ${exchangeMatch[1]}`
+    } else if (eventMatch && eventMatch[1]) {
+      line = `exchangeevente2e ${username} ${eventMatch[1]}`
+    } else {
+      throw new Error(`console_driver only accepts /exchange or /exchangeevente2e commands: ${command}`)
     }
-    const line = `exchangee2e ${username} ${match[1]}`
     const result = spawnSync(
       'screen',
       ['-S', screenSession, '-p', '0', '-X', 'stuff', `\u0015${line}\r`],

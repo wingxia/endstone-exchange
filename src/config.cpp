@@ -1,6 +1,7 @@
 #include "endstone_exchange/config.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <fstream>
@@ -119,6 +120,21 @@ std::int64_t parseCents(std::string value, std::string_view key)
 
 }  // namespace
 
+bool ProtectionConfig::contains(const std::string_view dimension_name, const int x, const int y,
+                                const int z) const noexcept
+{
+    if (!enabled || dimension.size() != dimension_name.size() ||
+        !std::equal(dimension.begin(), dimension.end(), dimension_name.begin(),
+                    [](const unsigned char left, const unsigned char right) {
+                        return std::tolower(left) == std::tolower(right);
+                    })) {
+        return false;
+    }
+    return x >= std::min(point1.x, point2.x) && x <= std::max(point1.x, point2.x) &&
+           y >= std::min(point1.y, point2.y) && y <= std::max(point1.y, point2.y) &&
+           z >= std::min(point1.z, point2.z) && z <= std::max(point1.z, point2.z);
+}
+
 Config Config::load(const std::filesystem::path &path)
 {
     std::ifstream input(path);
@@ -216,6 +232,25 @@ Config Config::load(const std::filesystem::path &path)
     config.economy.umoney_plugin = string_value("economy.umoney_plugin", config.economy.umoney_plugin);
     config.economy.recovery_interval_ticks =
         integer_value("economy.recovery_interval_ticks", config.economy.recovery_interval_ticks);
+
+    config.protection.enabled = bool_value("protection.enabled", config.protection.enabled);
+    config.protection.dimension = string_value("protection.dimension", config.protection.dimension);
+    config.protection.point1.x = integer_value("protection.point1_x", config.protection.point1.x);
+    config.protection.point1.y = integer_value("protection.point1_y", config.protection.point1.y);
+    config.protection.point1.z = integer_value("protection.point1_z", config.protection.point1.z);
+    config.protection.point2.x = integer_value("protection.point2_x", config.protection.point2.x);
+    config.protection.point2.y = integer_value("protection.point2_y", config.protection.point2.y);
+    config.protection.point2.z = integer_value("protection.point2_z", config.protection.point2.z);
+    if (config.protection.enabled) {
+        constexpr std::array required_keys{
+            "protection.dimension", "protection.point1_x", "protection.point1_y", "protection.point1_z",
+            "protection.point2_x", "protection.point2_y", "protection.point2_z"};
+        for (const auto *key : required_keys) {
+            if (!values.contains(key)) {
+                throw std::runtime_error("missing required protection setting " + std::string(key));
+            }
+        }
+    }
     config.validate();
     return config;
 }
@@ -254,6 +289,17 @@ cleanup_structure_captures = true
 provider = "internal"
 umoney_plugin = "umoney"
 recovery_interval_ticks = 100
+
+[protection]
+# Set enabled = true after replacing both points with opposite corners of the protected cuboid.
+enabled = false
+dimension = "Overworld"
+point1_x = 0
+point1_y = 0
+point1_z = 0
+point2_x = 0
+point2_y = 0
+point2_z = 0
 )config";
 }
 
@@ -295,6 +341,10 @@ void Config::validate() const
         if (market.initial_balance_cents != 0) {
             throw std::runtime_error("UMoney mode requires market.initial_balance = 0");
         }
+    }
+    if (protection.enabled &&
+        (protection.dimension.empty() || protection.dimension.find_first_of("\r\n") != std::string::npos)) {
+        throw std::runtime_error("protection.dimension must name one dimension");
     }
 }
 

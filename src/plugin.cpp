@@ -162,7 +162,8 @@ void ExchangePlugin::onEnable() {
         // still receive cancelled events and decide whether to consume them themselves.
         registerEvent(&ExchangePlugin::onPlayerInteract, *this, endstone::EventPriority::High, false);
         registerEvent(&ExchangePlugin::onPlayerInteractActor, *this, endstone::EventPriority::High, false);
-        registerEvent(&ExchangePlugin::onListedFrameBreak, *this, endstone::EventPriority::Highest, false);
+        registerEvent(&ExchangePlugin::onProtectedBlockBreak, *this, endstone::EventPriority::Highest, false);
+        registerEvent(&ExchangePlugin::onBlockPlace, *this, endstone::EventPriority::Highest, false);
         registerEvent(&ExchangePlugin::onBlockBreak, *this, endstone::EventPriority::Monitor, true);
         registerEvent(&ExchangePlugin::onActorExplode, *this, endstone::EventPriority::Highest, false);
         registerEvent(&ExchangePlugin::onBlockExplode, *this, endstone::EventPriority::Highest, false);
@@ -634,6 +635,12 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
 
     const bool exchanger = isExchanger(event.getItem());
     const bool price_stick = isPriceStick(event.getItem());
+    if (isProtectedBlock(block) && !exchanger && !price_stick &&
+        listing_it == frame_listing_index_.end() && market == target_index_.end()) {
+        event.cancel();
+        player.sendErrorMessage("{}", messageText(languageFor(player), Message::ProtectedRegion));
+        return;
+    }
     if (price_stick && isItemFrameBlock(block.getType())) {
         event.cancel();
         if (acceptInteraction(player)) {
@@ -718,24 +725,40 @@ void ExchangePlugin::onBlockBreak(endstone::BlockBreakEvent &event) {
     }
 }
 
-void ExchangePlugin::onListedFrameBreak(endstone::BlockBreakEvent &event) {
-    if (!ready_ || !frame_listing_index_.contains(blockTargetKey(event.getBlock()))) {
+void ExchangePlugin::onProtectedBlockBreak(endstone::BlockBreakEvent &event) {
+    if (!ready_) {
+        return;
+    }
+    if (frame_listing_index_.contains(blockTargetKey(event.getBlock()))) {
+        event.cancel();
+        event.getPlayer().sendErrorMessage(
+            "{}", messageText(languageFor(event.getPlayer()), Message::FrameSaleProtected));
+    }
+    else if (isProtectedBlock(event.getBlock())) {
+        event.cancel();
+        event.getPlayer().sendErrorMessage(
+            "{}", messageText(languageFor(event.getPlayer()), Message::ProtectedRegion));
+    }
+}
+
+void ExchangePlugin::onBlockPlace(endstone::BlockPlaceEvent &event) {
+    if (!ready_ || !isProtectedBlock(event.getBlockReplaced())) {
         return;
     }
     event.cancel();
     event.getPlayer().sendErrorMessage("{}",
-                                       messageText(languageFor(event.getPlayer()), Message::FrameSaleProtected));
+                                       messageText(languageFor(event.getPlayer()), Message::ProtectedRegion));
 }
 
 void ExchangePlugin::onActorExplode(endstone::ActorExplodeEvent &event) {
     if (ready_) {
-        protectListedFrames(event.getBlockList());
+        protectBlocks(event.getBlockList());
     }
 }
 
 void ExchangePlugin::onBlockExplode(endstone::BlockExplodeEvent &event) {
     if (ready_) {
-        protectListedFrames(event.getBlockList());
+        protectBlocks(event.getBlockList());
     }
 }
 
@@ -918,6 +941,10 @@ bool ExchangePlugin::isPriceStick(const std::optional<endstone::ItemStack> &item
 
 bool ExchangePlugin::canAdmin(endstone::Player &player) const {
     return player.isOp();
+}
+
+bool ExchangePlugin::isProtectedBlock(const endstone::Block &block) const noexcept {
+    return config_.protection.contains(block.getDimension().getName(), block.getX(), block.getY(), block.getZ());
 }
 
 std::string ExchangePlugin::blockTargetKey(const endstone::Block &block) const {
@@ -1829,9 +1856,10 @@ void ExchangePlugin::reconcileFrameSaleItems(endstone::Player &player) {
     }
 }
 
-void ExchangePlugin::protectListedFrames(std::vector<std::unique_ptr<endstone::Block>> &blocks) const {
+void ExchangePlugin::protectBlocks(std::vector<std::unique_ptr<endstone::Block>> &blocks) const {
     std::erase_if(blocks, [this](const std::unique_ptr<endstone::Block> &block) {
-        return block != nullptr && frame_listing_index_.contains(blockTargetKey(*block));
+        return block != nullptr &&
+               (frame_listing_index_.contains(blockTargetKey(*block)) || isProtectedBlock(*block));
     });
 }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace exchange {
 
@@ -35,10 +36,26 @@ struct EconomyConfig {
     [[nodiscard]] bool usesUmoney() const noexcept { return provider == "umoney"; }
 };
 
+struct BlockCoordinate {
+    int x{0};
+    int y{0};
+    int z{0};
+};
+
+struct ProtectionConfig {
+    bool enabled{false};
+    std::string dimension{"Overworld"};
+    BlockCoordinate point1;
+    BlockCoordinate point2;
+
+    [[nodiscard]] bool contains(std::string_view dimension_name, int x, int y, int z) const noexcept;
+};
+
 struct Config {
     DatabaseConfig database;
     MarketConfig market;
     EconomyConfig economy;
+    ProtectionConfig protection;
 
     static Config load(const std::filesystem::path &path);
     static void writeTemplate(const std::filesystem::path &path);

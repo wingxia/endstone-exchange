@@ -35,6 +35,24 @@ Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式�
 - 相同完整 NBT 的物品共享订单，不同物品快照分别交易。
 - 简体中文、繁体中文、英文和日文界面按客户端语言自动显示。
 
+## 交易所保护范围
+
+在 `plugins/exchange/config.toml` 中用同一维度的两个三维坐标点设置一个包含边界的长方体。两个点的顺序不限，维度名大小写不敏感；启用后，所有玩家（包括 OP）都不能在范围内破坏、放置或通过普通右键修改方块，爆炸也不会破坏范围内的方块。交易点和挂牌展示框的交易交互仍可正常使用。
+
+```toml
+[protection]
+enabled = true
+dimension = "Overworld"
+point1_x = -20
+point1_y = 50
+point1_z = -20
+point2_x = 20
+point2_y = 100
+point2_z = 20
+```
+
+启用时必须填写全部六个坐标；修改后需重启服务端。
+
 ## UMoney
 
 Exchange 在 Endstone 主线程直接调用 UMoney 的 `api_get_player_money` 和 `api_change_player_money`，读取和修改 UMoney 的整数余额。订单和交易临时余额在 Exchange 内部按交易分保存，金额单位为 `1 UMoney = 1u = 100 交易分`。玩家不需要手动换算或划转资金。

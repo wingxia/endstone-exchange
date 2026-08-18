@@ -16,7 +16,9 @@ on a production server.
   UMoney mutation to verify Exchange's pre-call balance recovery.
 - `endstone_event_driver.cpp` builds a temporary C++ plugin whose
   `exchangeevente2e` command raises a real left/right `PlayerInteractEvent` for
-  a selected block and can supply synthetic `exchanger` or `price` sticks.
+  a selected block and can supply synthetic `exchanger` or `price` sticks. Its
+  `break` and `place` actions raise real block events and apply the corresponding
+  air/stone world change only when the event pipeline accepts the action.
 
 The drivers assume an isolated offline-mode server, a disposable database, and a
 dedicated `screen` session. Back up the test server before fault injection.
@@ -47,6 +49,7 @@ node tests/e2e/umoney_bds_e2e.js
 ```
 
 Override `E2E_COMMANDS` with newline-separated `/exchange` commands and
+`/exchangeevente2e <break|place> <x> <y> <z>` commands, and set
 `E2E_FORM_RESPONSES` with newline-separated JSON form responses. The default
 `console_driver` mode routes commands through the temporary Python driver;
 direct packet modes remain available for protocol diagnostics.

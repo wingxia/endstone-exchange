@@ -42,7 +42,8 @@ class ExchangePlugin : public endstone::Plugin {
     void onPlayerInteract(endstone::PlayerInteractEvent &event);
     void onPlayerInteractActor(endstone::PlayerInteractActorEvent &event);
     void onBlockBreak(endstone::BlockBreakEvent &event);
-    void onListedFrameBreak(endstone::BlockBreakEvent &event);
+    void onProtectedBlockBreak(endstone::BlockBreakEvent &event);
+    void onBlockPlace(endstone::BlockPlaceEvent &event);
     void onActorExplode(endstone::ActorExplodeEvent &event);
     void onBlockExplode(endstone::BlockExplodeEvent &event);
     void onActorDamage(endstone::ActorDamageEvent &event);
@@ -86,6 +87,7 @@ class ExchangePlugin : public endstone::Plugin {
     [[nodiscard]] bool isExchanger(const std::optional<endstone::ItemStack> &item) const;
     [[nodiscard]] bool isPriceStick(const std::optional<endstone::ItemStack> &item) const;
     [[nodiscard]] bool canAdmin(endstone::Player &player) const;
+    [[nodiscard]] bool isProtectedBlock(const endstone::Block &block) const noexcept;
     [[nodiscard]] std::string blockTargetKey(const endstone::Block &block) const;
     [[nodiscard]] std::string actorTargetKey(const endstone::Actor &actor) const;
     [[nodiscard]] std::optional<Id> marketIdForActor(const endstone::Actor &actor) const;
@@ -120,7 +122,7 @@ class ExchangePlugin : public endstone::Plugin {
     void recoverFrameListings();
     void restoreFrameListingIndex();
     void reconcileFrameSaleItems(endstone::Player &player);
-    void protectListedFrames(std::vector<std::unique_ptr<endstone::Block>> &blocks) const;
+    void protectBlocks(std::vector<std::unique_ptr<endstone::Block>> &blocks) const;
     void toggleActor(endstone::Player &player, endstone::Actor &actor);
     void deactivate(endstone::Player *player, Id market_id, std::string_view reason, bool preserve_orders);
     void indexMarket(const Market &market);

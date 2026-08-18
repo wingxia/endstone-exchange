@@ -73,6 +73,7 @@ enum class Message {
     FrameSalePaidSeller,
     FrameSaleSettling,
     FrameSaleProtected,
+    ProtectedRegion,
     FrameSaleFailed,
     ActorNoItem,
     ActorEnabled,

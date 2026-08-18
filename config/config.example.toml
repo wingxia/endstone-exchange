@@ -26,3 +26,15 @@ cleanup_structure_captures = true
 provider = "internal"
 umoney_plugin = "umoney"
 recovery_interval_ticks = 100
+
+[protection]
+# The two points are inclusive opposite corners; their order does not matter.
+# Set enabled = true only after replacing all coordinates below.
+enabled = false
+dimension = "Overworld"
+point1_x = 0
+point1_y = 0
+point1_z = 0
+point2_x = 0
+point2_y = 0
+point2_z = 0
