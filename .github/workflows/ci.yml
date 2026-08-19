@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Endstone LLVM toolchain
-        uses: EndstoneMC/endstone/.github/actions/setup-clang@v0.11.6
+        uses: EndstoneMC/endstone/.github/actions/setup-clang@v0.11.7
         with:
           llvm-version: "20"
 

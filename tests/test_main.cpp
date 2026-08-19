@@ -1,5 +1,6 @@
 #include "endstone_exchange/config.hpp"
 #include "endstone_exchange/database.hpp"
+#include "endstone_exchange/bulk_sell.hpp"
 #include "endstone_exchange/exchange_service.hpp"
 #include "endstone_exchange/hologram_packet.hpp"
 #include "endstone_exchange/inventory_escrow.hpp"
@@ -173,6 +174,36 @@ point2_z = -8
     std::filesystem::remove(path, ignored);
     std::filesystem::remove(protected_path, ignored);
     std::filesystem::remove(incomplete_path, ignored);
+}
+
+void testBulkSellPlan() {
+    require(exchange::isBulkSellTerminal("minecraft:command_block") &&
+                exchange::isBulkSellTerminal("minecraft:chain_command_block") &&
+                exchange::isBulkSellTerminal("minecraft:repeating_command_block"),
+            "every command-block variant must open bulk sell");
+    require(!exchange::isBulkSellTerminal("minecraft:stone") &&
+                !exchange::isBulkSellTerminal("minecraft:command_block_minecart"),
+            "unrelated blocks must not open bulk sell");
+    require(exchange::BulkSellListingPriceCents == 100, "bulk-sell remainder price must be exactly 1u");
+
+    const auto plan = exchange::makeBulkSellPlan(
+        {{9, 42, 1'300}, {3, 42, 1'300}, {8, 43, 201}, {7, 44, 0}}, 640);
+    require(plan.item_kinds == 2 && plan.total_quantity == 1'501 && plan.batches.size() == 4,
+            "bulk-sell planning must deduplicate shared books and preserve every item");
+    require(plan.batches[0].market_id == 3 && plan.batches[0].quantity == 640 &&
+                plan.batches[1].market_id == 3 && plan.batches[1].quantity == 640 &&
+                plan.batches[2].market_id == 3 && plan.batches[2].quantity == 20 &&
+                plan.batches[3].market_id == 8 && plan.batches[3].quantity == 201,
+            "bulk-sell planning must choose the stable market and split only at the order limit");
+
+    bool rejected_inconsistent_shared_book = false;
+    try {
+        static_cast<void>(exchange::makeBulkSellPlan({{1, 10, 4}, {2, 10, 5}}, 640));
+    } catch (const std::exception &) {
+        rejected_inconsistent_shared_book = true;
+    }
+    require(rejected_inconsistent_shared_book,
+            "shared markets must not silently disagree about the sellable inventory quantity");
 }
 
 void testUmoneyRecoveryDecision() {
@@ -1333,6 +1364,29 @@ void testDatabaseIntegration() {
                 service.orderBook(distinct_nbt_market.id, 5).bids.empty(),
             "same item type with different NBT must remain an isolated product book");
 
+    auto bulk_market = distinct_nbt_market;
+    bulk_market.id = 0;
+    bulk_market.book_id = 0;
+    bulk_market.target_key = "block|overworld|5|64|0";
+    bulk_market.block_x = 5;
+    bulk_market.item = {"minecraft:iron_ingot", 0, {}, "Iron Ingot"};
+    bulk_market = service.activateMarket(bulk_market);
+    static_cast<void>(service.placeOrder(
+        {bulk_market.id, std::string(Charlie), "Charlie", exchange::Side::Buy,
+         exchange::OrderType::Limit, 350, 2}));
+    const auto bulk_sale = service.placeOrder(
+        {bulk_market.id, std::string(Bob), "Bob", exchange::Side::Sell,
+         exchange::OrderType::Limit, exchange::BulkSellListingPriceCents, 5});
+    require(bulk_sale.filled_quantity == 2 && bulk_sale.open_quantity == 3 &&
+                bulk_sale.gross_cents == 700,
+            "a 1u bulk-sell limit must consume the highest bids and list only the unmatched remainder");
+    const auto bulk_book = service.orderBook(bulk_market.id, 5);
+    require(bulk_book.bids.empty() && bulk_book.asks.size() == 1 &&
+                bulk_book.asks.front().price_cents == exchange::BulkSellListingPriceCents &&
+                bulk_book.asks.front().quantity == 3,
+            "bulk-sell remainder must rest on the book at exactly 1u");
+    service.cancelOrder(bulk_sale.order_id, Bob);
+
     const auto excess_escrow = service.prepareSellEscrow(
         {replacement.id, std::string(Bob), "Bob", exchange::Side::Sell, exchange::OrderType::Limit, 250, 1});
     service.markSellEscrowTagged(excess_escrow.id, 2, 1);
@@ -1508,6 +1562,7 @@ int main() {
         testNbtCodec();
         testDeliveryMarkerCleanup();
         testConfig();
+        testBulkSellPlan();
         testUmoneyRecoveryDecision();
         testTradeFormFlow();
         testLocalization();

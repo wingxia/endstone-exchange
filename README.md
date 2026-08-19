@@ -9,8 +9,8 @@ Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式�
 
 | 组件 | 版本 |
 | --- | --- |
-| Endstone | 0.11.6 |
-| BDS | 1.26.33.1 |
+| Endstone | 0.11.7 |
+| BDS | 1.26.40 |
 | UMoney | 260602 |
 | Linux 编译器 | LLVM/Clang 20 + libc++ |
 | 数据库 | MySQL 8 / MariaDB，InnoDB |
@@ -104,12 +104,13 @@ recovery_interval_ticks = 100
    echo "f4f0e6229ca17c55f409d46878bd75ce00c3652510756bbb4dbacc791b7f2690  endstone_exchange-v1.9.0-linux-x86_64.so" | sha256sum --check
    ```
 
-3. 安装 UMoney 260602 正式 wheel。
-4. 将发布文件复制到服务端 `plugins/endstone_exchange.so`。
-5. 启动一次服务端，生成 `plugins/exchange/config.toml`。
-6. 配置 MySQL，并按上方示例启用 UMoney。
-7. 将配置文件权限限制为服务账号可读，例如 `chmod 600 plugins/exchange/config.toml`。
-8. 重启服务端并执行 `exchange status`，确认 Exchange `1.9.0`、UMoney `260602` 和数据库均可用。
+3. 使用 Endstone 0.11.7 运行 BDS 1.26.40。
+4. 安装 UMoney 260602 正式 wheel。
+5. 将发布文件复制到服务端 `plugins/endstone_exchange.so`。
+6. 启动一次服务端，生成 `plugins/exchange/config.toml`。
+7. 配置 MySQL，并按上方示例启用 UMoney。
+8. 将配置文件权限限制为服务账号可读，例如 `chmod 600 plugins/exchange/config.toml`。
+9. 重启服务端并执行 `exchange status`，确认 Exchange `1.9.0`、UMoney `260602` 和数据库均可用。
 
 完整配置模板位于 [config/config.example.toml](config/config.example.toml)。
 

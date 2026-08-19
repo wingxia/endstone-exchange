@@ -6,15 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Endstone's Linux ABI is libc++. Its top-level project applies this itself,
-# but those directory options do not propagate when Endstone is consumed with
-# FetchContent, so plugin consumers must opt in explicitly.
-if(UNIX AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    add_compile_options(-stdlib=libc++)
-    add_link_options(-stdlib=libc++)
-endif()
-
-set(ENDSTONE_VERSION "0.11.6" CACHE STRING "Exact Endstone release to target")
+set(ENDSTONE_VERSION "0.11.7" CACHE STRING "Exact Endstone release to target")
 option(EXCHANGE_BUILD_TESTS "Build the exchange test executable" ON)
 option(EXCHANGE_BUILD_E2E_DRIVER "Build the isolated Endstone event E2E driver" OFF)
 
@@ -44,6 +36,7 @@ configure_file(include/endstone_exchange/version.hpp.in
                ${CMAKE_CURRENT_BINARY_DIR}/generated/endstone_exchange/version.hpp @ONLY)
 
 set(EXCHANGE_CORE_SOURCES
+    src/bulk_sell.cpp
     src/config.cpp
     src/database.cpp
     src/exchange_service.cpp

@@ -635,6 +635,13 @@ void ExchangePlugin::onPlayerInteract(endstone::PlayerInteractEvent &event) {
 
     const bool exchanger = isExchanger(event.getItem());
     const bool price_stick = isPriceStick(event.getItem());
+    if (isBulkSellTerminal(block.getType()) && !exchanger && !price_stick) {
+        event.cancel();
+        if (acceptInteraction(player)) {
+            queueBulkSellForm(player);
+        }
+        return;
+    }
     if (isProtectedBlock(block) && !exchanger && !price_stick &&
         listing_it == frame_listing_index_.end() && market == target_index_.end()) {
         event.cancel();
@@ -1989,6 +1996,175 @@ void ExchangePlugin::restoreMarkets() {
     refreshHolograms();
 }
 
+BulkSellPlan ExchangePlugin::buildBulkSellPlan(const endstone::PlayerInventory &inventory) const {
+    std::vector<BulkSellCandidate> candidates;
+    candidates.reserve(markets_.size());
+    for (const auto &[market_id, market] : markets_) {
+        candidates.push_back({market_id, market.book_id, sellableItemCount(inventory, market.item)});
+    }
+    return makeBulkSellPlan(candidates, config_.market.max_order_quantity);
+}
+
+void ExchangePlugin::queueBulkSellForm(endstone::Player &player) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                openBulkSellForm(*current);
+            }
+        },
+        1));
+}
+
+void ExchangePlugin::openBulkSellForm(endstone::Player &player) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto language = languageFor(player);
+    if (!open_trade_forms_.insert(player_uuid).second) {
+        return;
+    }
+    try {
+        service_->ensureAccount(player_uuid, player.getName());
+        static_cast<void>(claimDeliveries(player, false));
+        queueInventoryResync(player);
+        const auto plan = buildBulkSellPlan(player.getInventory());
+
+        endstone::MessageForm form;
+        form.setTitle(std::string(messageText(language, Message::BulkSellTitle)))
+            .setContent(plan.total_quantity == 0
+                            ? std::string(messageText(language, Message::BulkSellNoItems))
+                            : tr(language, Message::BulkSellConfirmContent, plan.item_kinds, plan.total_quantity))
+            .setButton1(std::string(messageText(language, Message::BulkSellConfirmButton)))
+            .setButton2(std::string(messageText(language, Message::BulkSellCancelButton)))
+            .setOnSubmit([this, player_uuid](endstone::Player *form_player, const int selection) {
+                open_trade_forms_.erase(player_uuid);
+                if (form_player == nullptr || !ready_ || form_player->getUniqueId().str() != player_uuid) {
+                    return;
+                }
+                form_player->closeForm();
+                if (selection == 0) {
+                    queueBulkSellSubmission(*form_player);
+                }
+            })
+            .setOnClose([this, player_uuid](endstone::Player *) { open_trade_forms_.erase(player_uuid); });
+        player.sendForm(std::move(form));
+    } catch (const std::exception &error) {
+        open_trade_forms_.erase(player_uuid);
+        player.sendErrorMessage(
+            "{}", tr(language, Message::BulkSellOpenFailed, userFacingError(language, error)));
+        getLogger().warning("Open bulk-sell form failed for {}: {}", player.getName(), error.what());
+    }
+}
+
+void ExchangePlugin::queueBulkSellSubmission(endstone::Player &player) {
+    const auto player_uuid = player.getUniqueId().str();
+    const auto player_name = player.getName();
+    static_cast<void>(getServer().getScheduler().runTaskLater(
+        *this,
+        [this, player_uuid, player_name] {
+            if (!ready_) {
+                return;
+            }
+            auto *current = getServer().getPlayer(player_name);
+            if (current != nullptr && current->getUniqueId().str() == player_uuid) {
+                submitBulkSell(*current);
+            }
+        },
+        1));
+}
+
+void ExchangePlugin::submitBulkSell(endstone::Player &player) {
+    const auto language = languageFor(player);
+    int processed_quantity = 0;
+    int filled_quantity = 0;
+    int listed_quantity = 0;
+    Cents gross_cents = 0;
+    std::size_t order_count = 0;
+    std::unordered_set<Id> touched_books;
+    std::optional<std::string> failure;
+
+    try {
+        service_->ensureAccount(player.getUniqueId().str(), player.getName());
+        static_cast<void>(claimDeliveries(player, false));
+        const auto plan = buildBulkSellPlan(player.getInventory());
+        if (plan.total_quantity == 0) {
+            player.sendMessage("{}", messageText(language, Message::BulkSellNoItems));
+            queueInventoryResync(player);
+            return;
+        }
+
+        for (const auto &batch : plan.batches) {
+            try {
+                OrderRequest request;
+                request.market_id = batch.market_id;
+                request.player_uuid = player.getUniqueId().str();
+                request.player_name = player.getName();
+                request.side = Side::Sell;
+                request.type = OrderType::Limit;
+                request.price_cents = BulkSellListingPriceCents;
+                request.quantity = batch.quantity;
+
+                const auto result = submitSellEscrow(player, request);
+                processed_quantity += result.requested_quantity;
+                filled_quantity += result.filled_quantity;
+                listed_quantity += result.open_quantity;
+                gross_cents += result.gross_cents;
+                ++order_count;
+                touched_books.insert(batch.book_id);
+
+                // tagSellItems moves whole stacks. A batch that ends inside a stack returns
+                // the excess as a durable delivery; claim it before planning the next batch.
+                static_cast<void>(claimDeliveries(player, false));
+            } catch (const std::exception &error) {
+                failure = userFacingError(language, error);
+                getLogger().warning("Bulk-sell batch failed for {} at market {}: {}", player.getName(),
+                                    batch.market_id, error.what());
+                break;
+            }
+        }
+
+        processEconomyTransfers();
+        for (const auto &[market_id, market] : markets_) {
+            static_cast<void>(market_id);
+            if (!touched_books.contains(market.book_id)) {
+                continue;
+            }
+            try {
+                refreshHologram(market);
+            } catch (const std::exception &error) {
+                getLogger().warning("Bulk-sell hologram refresh failed for market {}: {}", market.id,
+                                    error.what());
+            }
+        }
+        queueInventoryResync(player);
+
+        if (failure) {
+            if (order_count == 0) {
+                player.sendErrorMessage("{}", tr(language, Message::BulkSellFailed, *failure));
+            } else {
+                player.sendErrorMessage(
+                    "{}", tr(language, Message::BulkSellPartiallyCompleted, processed_quantity, filled_quantity,
+                             listed_quantity, order_count, *failure));
+            }
+            return;
+        }
+        player.sendMessage("{}", tr(language, Message::BulkSellCompleted, plan.item_kinds,
+                                     processed_quantity, filled_quantity, listed_quantity,
+                                     formatMoney(gross_cents), order_count));
+    } catch (const std::exception &error) {
+        processEconomyTransfers();
+        player.sendErrorMessage("{}", tr(language, Message::BulkSellFailed,
+                                           userFacingError(language, error)));
+        getLogger().warning("Bulk sell failed for {}: {}", player.getName(), error.what());
+        queueInventoryResync(player);
+    }
+}
+
 void ExchangePlugin::queueTradeForm(endstone::Player &player, const Id market_id) {
     const auto player_uuid = player.getUniqueId().str();
     const auto player_name = player.getName();
@@ -2694,9 +2870,8 @@ void ExchangePlugin::refreshHolograms() {
         }
         auto *state_ptr = state.get();
         try {
-            // Endstone 0.11.6's async scheduler captures its queued task by reference before
-            // dispatching it to the worker pool, which can dereference a dead queue element.
-            // Own one standard C++ worker instead and join it explicitly during shutdown.
+            // Keep the blocking database snapshot off the server thread and own its worker
+            // so plugin shutdown can join it before shared state is destroyed.
             state->query_thread = std::jthread(
                 [state_ptr, ids = std::move(ids), database_config, initial_balance, max_order_quantity] {
                     try {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "endstone_exchange/bulk_sell.hpp"
 #include "endstone_exchange/config.hpp"
 #include "endstone_exchange/domain.hpp"
 #include "endstone_exchange/exchange_service.hpp"
@@ -128,6 +129,12 @@ class ExchangePlugin : public endstone::Plugin {
     void indexMarket(const Market &market);
     void unindexMarket(Id market_id);
     void restoreMarkets();
+
+    [[nodiscard]] BulkSellPlan buildBulkSellPlan(const endstone::PlayerInventory &inventory) const;
+    void queueBulkSellForm(endstone::Player &player);
+    void openBulkSellForm(endstone::Player &player);
+    void queueBulkSellSubmission(endstone::Player &player);
+    void submitBulkSell(endstone::Player &player);
 
     void queueTradeForm(endstone::Player &player, Id market_id);
     void openTradeForm(endstone::Player &player, Id market_id);

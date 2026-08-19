@@ -1,8 +1,9 @@
-# Endstone v0.11.6 feasibility
+# Endstone v0.11.7 feasibility
 
-This implementation is pinned to the latest verified stable release, Endstone v0.11.6 (published 2026-07-10).
+This implementation is pinned to the latest verified stable release, Endstone v0.11.7 (published 2026-08-05).
+Endstone v0.11.7 propagates the required libc++ compile and link options through `endstone::endstone`; the plugin therefore consumes those settings from the public CMake target.
 
-| Requirement | Endstone v0.11.6 API | Implementation |
+| Requirement | Endstone v0.11.7 API | Implementation |
 | --- | --- | --- |
 | Right-click a block | `PlayerInteractEvent` and `Action::RightClickBlock` | Public API |
 | Right-click an actor | `PlayerInteractActorEvent` | Public API |
@@ -22,11 +23,11 @@ Bedrock exposes buttons and text inputs in separate native form types and does n
 
 Vanilla Bedrock armor stands include normal physics and gravity. The plugin therefore places block labels directly on the target's top surface and does not teleport them during price refreshes. It also checks `Dimension::getLoadedChunks()` before spawning, waits 20 ticks for persisted actors to return, and reconciles duplicate tagged actors after `ChunkLoadEvent`. Because a raw metadata update is ignored when a reconnecting Bedrock client has not received that actor's `AddActor` packet, labels in chunks that were already loaded when the player joined are recreated once after spawn or the first chunk crossing; the replacement waits five ticks after removal and then retries appearance metadata. Newly loaded chunks use their normal `AddActor` flow without an unnecessary recreation. This avoids the former one-second vertical jump, the unloaded-chunk duplicate race, and missing labels after reconnect.
 
-Item-frame contents are the one API gap in v0.11.6. Bedrock Dedicated Server stores a `structure save ... disk` result under a `structuretemplate_<namespace:name>` key in the world's LevelDB, rather than as a standalone `.mcstructure` file. The capture therefore runs asynchronously so LevelDB can flush the write without blocking the server thread. A second exchanger click while capture is pending cancels it. If the frame's `Item` tag is absent, the market item is `minecraft:frame`.
+Item-frame contents are the one API gap in v0.11.7. Bedrock Dedicated Server stores a `structure save ... disk` result under a `structuretemplate_<namespace:name>` key in the world's LevelDB, rather than as a standalone `.mcstructure` file. The capture therefore runs asynchronously so LevelDB can flush the write without blocking the server thread. A second exchanger click while capture is pending cancels it. If the frame's `Item` tag is absent, the market item is `minecraft:frame`.
 
 Primary references:
 
-- [Endstone v0.11.6 release](https://github.com/EndstoneMC/endstone/releases/tag/v0.11.6)
+- [Endstone v0.11.7 release](https://github.com/EndstoneMC/endstone/releases/tag/v0.11.7)
 - [C++ PlayerInteractEvent](https://endstone.dev/latest/reference/cpp/classendstone_1_1PlayerInteractEvent/)
 - [C++ PlayerInteractActorEvent](https://endstone.dev/latest/reference/cpp/classendstone_1_1PlayerInteractActorEvent/)
 - [C++ Actor API](https://endstone.dev/latest/reference/cpp/classendstone_1_1Actor/)
