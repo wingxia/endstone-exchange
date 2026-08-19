@@ -54,5 +54,17 @@ Override `E2E_COMMANDS` with newline-separated `/exchange` commands and
 `console_driver` mode routes commands through the temporary Python driver;
 direct packet modes remain available for protocol diagnostics.
 
+For a Bedrock version that the installed `bedrock-protocol` release can join but
+cannot fully decode, `E2E_IGNORE_PARTIAL_READ_ERRORS=1` ignores only
+`PartialReadError` decoder events. The first one is logged and the total appears
+as `ignoredProtocolErrors` in `SUMMARY`; command, form, kick and all other errors
+still fail the run. Use this opt-in only after confirming the ignored packets are
+unrelated to the behavior under test.
+
+Form response JSON must match the Bedrock form kind: an action-form button is a
+numeric index, a message-form button is `true`/`false`, and a custom form is a
+JSON array. Omit a response to leave a form unanswered; do not send `null` as a
+synthetic close.
+
 After testing, stop the server, remove both temporary E2E plugins, rebuild with
 `EXCHANGE_BUILD_E2E_DRIVER=OFF`, and perform a clean production-like restart.

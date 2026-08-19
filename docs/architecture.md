@@ -5,6 +5,7 @@
 | Module | Responsibility | Must not own |
 | --- | --- | --- |
 | `plugin` | Endstone events, commands, player messages, world targets and hologram actors | SQL schema or matching rules |
+| `bulk_sell` | Recognize command-block terminals and build deterministic, shared-book-aware batches for inventory-wide selling | Endstone inventory mutation, SQL or settlement |
 | `inventory_escrow` | Hidden inventory markers, crash recovery receipts, NBT-safe delivery cleanup | Order matching or account balances |
 | `hologram_packet` | Version-pinned Bedrock `SetActorData` payload for a tiny, zero-box nameplate carrier | Markets, SQL or world lookup |
 | `market_display` | Stable label anchors, chunk coordinate mapping and simple player-facing trade text | Endstone actors, SQL or scheduling |
@@ -28,6 +29,7 @@ The Endstone adapter may call the domain service, but the service never calls En
 - Orders, trades and deliveries always reference an immutable market item snapshot.
 - `exchange_delivery_claims` reserves a delivery before a claim marker enters the inventory. Reconnect either applies the tagged quantity or releases the reservation.
 - `exchange_sell_escrows` moves whole matching stacks through `PREPARED`, `TAGGED`, `ORDERED` and `CLEANED`. Temporary barrier receipts make an interrupted inventory removal distinguishable from an order that was never funded.
+- Command-block bulk sell deduplicates active markets by exact-item book, selects a stable physical market and splits quantities at the configured order limit. Each batch is an ordinary crash-recoverable limit sell at exactly 100 cents; it matches the highest eligible bids first and leaves only the remainder open at `1u`. Whole-stack escrow excess is claimed before the next batch, and items without an active exact-NBT book are never selected.
 - `exchange_balance_ledger` is append-only. For every player, `SUM(delta_cents)` must equal `exchange_accounts.balance_cents`.
 - `exchange_economy_transfers` is the durable cross-system saga. A withdrawal reserves internal balance before UMoney credit; a deposit credits internal balance only after the UMoney debit is known applied. Every new direct transfer persists the UMoney pre-call balance; `operation_key` is immutable and unique.
 - `exchange_frame_listings` stores immutable item snapshots and moves one-price item-frame sales through `ACTIVE`, `PAID`, `DROPPED`, and `CLAIMED`; cancellation is only legal before payment. `exchange_frame_listing_bindings` is the unique mutable guard for a frame until its marked drop is picked up.
@@ -80,6 +82,7 @@ The embedded runner checks `exchange_schema_versions` and makes each upgrade ret
 - Price-time priority, partial fills, crossed limit prices, cancellation, market close and self-trade exclusion.
 - Same-item cross-position matching, independent position toggles and different-NBT isolation.
 - Repeated interaction packets, duplicate forms, form close after submission, main inventory and offhand sell escrow.
+- All three command-block variants, confirmation/cancellation, empty inventory, mixed tradable/non-tradable inventory, shared-book deduplication, maximum-order splitting, partial batch failure and protected-region access.
 - Locale resolution, catalog completeness and all player-visible flows in `zh_CN`, `en_US`, `zh_TW` and `ja_JP`, including per-recipient hologram metadata.
 - Server termination at every delivery and sell-escrow state transition, followed by reconnect recovery.
 - Direct UMoney debit and credit success/failure, insufficient balance, missing account, unavailable plugin, retry and manual-reconciliation quarantine.

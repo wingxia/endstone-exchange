@@ -7,12 +7,13 @@ const bedrock = require('bedrock-protocol')
 const host = process.env.E2E_HOST || '127.0.0.1'
 const port = Number(process.env.E2E_PORT || 19141)
 const username = process.env.E2E_USERNAME || 'UmoneyE2E'
-const version = process.env.E2E_VERSION || '1.26.30'
+const version = process.env.E2E_VERSION || '1.26.40'
 const commandDelay = Number(process.env.E2E_COMMAND_DELAY_MS || 2500)
 const commandVersion = process.env.E2E_COMMAND_VERSION ?? ''
 const packetMode = process.env.E2E_PACKET_MODE || 'command_request'
 const dispatchMode = process.env.E2E_DISPATCH_MODE || 'console_driver'
 const screenSession = process.env.E2E_SCREEN_SESSION || ''
+const ignorePartialReadErrors = process.env.E2E_IGNORE_PARTIAL_READ_ERRORS === '1'
 const formResponses = (process.env.E2E_FORM_RESPONSES || '')
   .split('\n')
   .map(value => value.trim())
@@ -64,6 +65,7 @@ let failed = false
 let commandOutputs = 0
 let textPackets = 0
 let formPackets = 0
+let ignoredProtocolErrors = 0
 let ranAllCommands = false
 let playerEntityId = 0n
 
@@ -180,6 +182,13 @@ client.on('modal_form_request', packet => {
 })
 
 client.on('error', error => {
+  if (ignorePartialReadErrors && error?.name === 'PartialReadError') {
+    ignoredProtocolErrors += 1
+    if (ignoredProtocolErrors === 1) {
+      console.warn(`IGNORED_PROTOCOL_ERROR ${error.message}`)
+    }
+    return
+  }
   failed = true
   console.error(`ERROR ${error.stack || error}`)
 })
@@ -204,7 +213,7 @@ client.on('spawn', async () => {
   }
   ranAllCommands = true
   await sleep(commandDelay)
-  console.log(`SUMMARY ${json({ commands: commands.length, commandOutputs, textPackets, formPackets, failed })}`)
+  console.log(`SUMMARY ${json({ commands: commands.length, commandOutputs, textPackets, formPackets, ignoredProtocolErrors, failed })}`)
   finish(failed ? 1 : 0)
 })
 

@@ -1,15 +1,15 @@
 # Endstone Exchange
 
-Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式版本为 **1.9.0**，支持世界交易点、展示框一口价交易、完整 NBT 物品、MySQL 持久化和 UMoney 资金系统。
+Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式版本为 **1.10.0**，支持世界交易点、命令方块背包一键出售、展示框一口价交易、交易所区域保护、完整 NBT 物品、MySQL 持久化和 UMoney 资金系统。
 
-- 正式版本：[v1.9.0](https://github.com/wingxia/endstone-exchange/releases/tag/v1.9.0)
+- 正式版本：[v1.10.0](https://github.com/wingxia/endstone-exchange/releases/tag/v1.10.0)
 - 构建状态：[main CI](https://github.com/wingxia/endstone-exchange/actions/workflows/ci.yml?query=branch%3Amain)
 
 ## 兼容性
 
 | 组件 | 版本 |
 | --- | --- |
-| Endstone | 0.11.7 |
+| Endstone | 0.11.7（NAS 回归运行时 0.11.8） |
 | BDS | 1.26.40 |
 | UMoney | 260602 |
 | Linux 编译器 | LLVM/Clang 20 + libc++ |
@@ -35,9 +35,21 @@ Endstone Exchange 是面向 Endstone 的 C++ 物品交易插件。当前正式�
 - 相同完整 NBT 的物品共享订单，不同物品快照分别交易。
 - 简体中文、繁体中文、英文和日文界面按客户端语言自动显示。
 
+## 命令方块背包一键出售
+
+玩家空手或手持普通物品右击命令方块、连锁命令方块或循环命令方块，会看到一键出售确认框。确认后插件按以下规则处理玩家主背包和副手：
+
+1. 只选择当前已有活跃交易点、且完整 NBT 与交易物快照完全相同的物品。
+2. 每种物品先按订单簿当前最高买价成交，同价时优先成交更早的订单。
+3. 没有买单或未全部成交的余量自动以每件 `1u` 建立限价卖单。
+4. 没有被设为交易物的物品、不同 NBT 的物品及护甲栏物品保持不变；副手中的交易物按相同规则出售。
+5. 相同完整 NBT 的多个物理交易点共享同一订单簿，只处理一次；数量超过单笔上限时自动拆单。
+
+成交收入自动结算到 UMoney。未成交的 `1u` 卖单可通过 `/exchange orders` 查看或取消，取消后物品由正常的暂存领取流程安全返还。命令方块位于已配置的交易所保护范围内时，此交易入口仍然可用。
+
 ## 交易所保护范围
 
-在 `plugins/exchange/config.toml` 中用同一维度的两个三维坐标点设置一个包含边界的长方体。两个点的顺序不限，维度名大小写不敏感；启用后，所有玩家（包括 OP）都不能在范围内破坏、放置或通过普通右键修改方块，爆炸也不会破坏范围内的方块。交易点和挂牌展示框的交易交互仍可正常使用。
+在 `plugins/exchange/config.toml` 中用同一维度的两个三维坐标点设置一个包含边界的长方体。两个点的顺序不限，维度名大小写不敏感；启用后，所有玩家（包括 OP）都不能在范围内破坏、放置或通过普通右键修改方块，爆炸也不会破坏范围内的方块。交易点、挂牌展示框和命令方块一键出售的交易交互仍可正常使用。
 
 ```toml
 [protection]
@@ -97,11 +109,11 @@ recovery_interval_ticks = 100
 
 ## 安装
 
-1. 从 [v1.9.0 Release](https://github.com/wingxia/endstone-exchange/releases/tag/v1.9.0) 下载 `endstone_exchange-v1.9.0-linux-x86_64.so`。
+1. 从 [v1.10.0 Release](https://github.com/wingxia/endstone-exchange/releases/tag/v1.10.0) 下载 `endstone_exchange-v1.10.0-linux-x86_64.so`。
 2. 校验发布文件：
 
    ```bash
-   echo "f4f0e6229ca17c55f409d46878bd75ce00c3652510756bbb4dbacc791b7f2690  endstone_exchange-v1.9.0-linux-x86_64.so" | sha256sum --check
+   echo "3ad547502ca0a24c4a20a09a18ee4067d67de3f5aab514fe9eebebf6ad73329a  endstone_exchange-v1.10.0-linux-x86_64.so" | sha256sum --check
    ```
 
 3. 使用 Endstone 0.11.7 运行 BDS 1.26.40。
@@ -110,7 +122,7 @@ recovery_interval_ticks = 100
 6. 启动一次服务端，生成 `plugins/exchange/config.toml`。
 7. 配置 MySQL，并按上方示例启用 UMoney。
 8. 将配置文件权限限制为服务账号可读，例如 `chmod 600 plugins/exchange/config.toml`。
-9. 重启服务端并执行 `exchange status`，确认 Exchange `1.9.0`、UMoney `260602` 和数据库均可用。
+9. 重启服务端并执行 `exchange status`，确认 Exchange `1.10.0`、UMoney `260602` 和数据库均可用。
 
 完整配置模板位于 [config/config.example.toml](config/config.example.toml)。
 
@@ -124,7 +136,8 @@ sudo apt-get install cmake ninja-build pkg-config libc++-20-dev libc++abi-20-dev
 
 cmake -S . -B build -G Ninja \
   -DCMAKE_CXX_COMPILER=clang++-20 \
-  -DEXCHANGE_BUILD_TESTS=ON
+  -DEXCHANGE_BUILD_TESTS=ON \
+  -DEXCHANGE_BUILD_E2E_DRIVER=OFF
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
@@ -138,23 +151,21 @@ ctest --test-dir build --output-on-failure
 
 测试会清理测试库中以 `exchange_` 开头的表，测试配置不能指向生产数据库。
 
-## v1.9.0 验证结果
+## v1.10.0 验证结果
 
-- Clean Release 构建通过。
-- CTest 全部通过。
-- GitHub Actions `main` 与 `v1.9.0` 标签 CI 全部通过。
-- NAS UDP 19141 Endstone/BDS 实机测试通过。
-- 展示框挂牌、购买、余额不足、改价、取消和完整 NBT 掉落测试通过。
-- `exchanger` 非 OP 拒绝与 OP 创建交易点测试通过。
-- 限价订单、直接成交、退款、离线领取和重连测试通过。
-- SIGKILL、资金写入中断和连续两次重启恢复测试通过，无重复扣款或重复入账。
+- LLVM/Clang 20 Clean Release 构建通过，确认 `EXCHANGE_BUILD_E2E_DRIVER=OFF`，CTest 全部通过。
+- 2026-08-19 在隔离的 NAS UDP 19141、BDS 1.26.40 与 Endstone 0.11.8 运行时完成真实 Bedrock 假人回归；生产服进程未参与测试。
+- 普通、连锁和循环命令方块入口均通过。核心场景中卖家背包有 5 个钻石块与 7 根羽毛，买单以 `5u` 收购 2 个：确认后 2 个成交并获得 `10u`，其余 3 个以 `1u` 挂单，7 根非交易物羽毛完整保留。
+- 限价买卖、直接买卖、部分成交、价格优先、取消返还、退款、离线领取、重连、共享订单簿、市场关闭/重开、非 OP 权限拒绝和保护范围内外交互均通过。
+- 两次优雅重启后市场、余额和订单状态保持一致；最终卸载全部临时 E2E 驱动并以正式产物重启，恢复 11 个活跃交易点，数据库正常，未完成/待核对直接转账为 0。
+- 展示框一口价路径继续由 CTest 与 v1.9.0 的完整 NAS 发布回归覆盖；本版本未修改展示框状态机。
 
-正式发布：[Endstone Exchange v1.9.0](https://github.com/wingxia/endstone-exchange/releases/tag/v1.9.0)
+正式发布：[Endstone Exchange v1.10.0](https://github.com/wingxia/endstone-exchange/releases/tag/v1.10.0)
 
 | 文件 | SHA-256 |
 | --- | --- |
-| `endstone-exchange-v1.9.0-linux-x86_64.tar.gz` | `2aea992290c7f758adb8f53a8834015f2d9c2cf171c0a574a85c6f0e44b72966` |
-| `endstone_exchange-v1.9.0-linux-x86_64.so` | `f4f0e6229ca17c55f409d46878bd75ce00c3652510756bbb4dbacc791b7f2690` |
+| `endstone-exchange-v1.10.0-linux-x86_64.tar.gz` | `3f89af9ad525adc5df1bafbb35c481eeb220fa4630922f820e949dc674bbcb70` |
+| `endstone_exchange-v1.10.0-linux-x86_64.so` | `3ad547502ca0a24c4a20a09a18ee4067d67de3f5aab514fe9eebebf6ad73329a` |
 
 ## 许可证
 
